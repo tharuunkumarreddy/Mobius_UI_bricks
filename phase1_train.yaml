@@ -58,7 +58,7 @@ implementation:
         IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
         def extract_if_compressed(file_path, extract_to):
-            """Extract compressed file if needed and return the directory path"""
+            # Extract compressed file if needed and return the directory path
             file_path = Path(file_path)
             extract_to = Path(extract_to)
             
