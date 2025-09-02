@@ -1,5 +1,5 @@
-name: Load UI Components dataset
-description: Downloads UI components dataset from Kaggle, processes and splits into train/val/test sets, and outputs train, test, validation datasets along with manifest and metadata files.
+name: load_ui_components_dataset
+description: Load UI components dataset from Kaggle, split into train/val/test, and emit train/test/val descriptors plus manifest and metadata.
 outputs:
   - {name: train_data, type: Dataset}
   - {name: test_data, type: Dataset}
@@ -23,7 +23,7 @@ implementation:
 
         # ---- Hardcode Kaggle credentials (use secrets in prod) ----
         mkdir -p /root/.kaggle
-        cat > /root/.kaggle/kaggle.json <<EOF
+        cat > /root/.kaggle/kaggle.json <<'EOF'
         {
           "username": "chtharunkumarreddy09",
           "key": "1f063391436fcaa34c9d57c545cbd731"
@@ -63,25 +63,18 @@ implementation:
         echo "Detected dataset root: $SRC_DIR"
         export SRC_DIR
 
-        # ---- Run processing script ----
+        # ---- Run processing script (no triple-quoted docstrings) ----
         python - << 'PY'
         #!/usr/bin/env python3
-        """
-        Loads a UI components dataset from Kaggle, splits into train/val/test,
-        and produces:
-          - train/, val/, test/ tree under /tmp/processed_data
-          - dataset_manifest.csv
-          - categories.json
-          - components_mapping.json
-        Kubeflow outputs (paths provided via args) receive small pickled descriptors or data.
-        """
+        # Data loading + splitting: read Kaggle dataset at SRC_DIR, split to /tmp/processed_data/{train,val,test},
+        # then emit Kubeflow outputs as pickled descriptors + data objects.
 
         import argparse, json, random, shutil, os, pickle, sys
         from pathlib import Path
         from math import floor
         import pandas as pd
 
-        # ----------------- Parser (matches outputs/args mapping) -----------------
+        # -------- Parser (must match outputs/args mapping) --------
         parser = argparse.ArgumentParser()
         parser.add_argument('--train_data', type=str, required=True)
         parser.add_argument('--test_data', type=str, required=True)
@@ -89,12 +82,9 @@ implementation:
         parser.add_argument('--dataset_manifest', type=str, required=True)
         parser.add_argument('--categories_json', type=str, required=True)
         parser.add_argument('--components_mapping', type=str, required=True)
-
-        # Optional split controls (constants here, can be exposed if needed)
-        # Keeping hard-coded to match "input in first brick is hardcoded" requirement
         args = parser.parse_args()
 
-        # ----------------- Constants & helpers -----------------
+        # -------- Helpers --------
         ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
         def list_images(folder: Path):
@@ -146,8 +136,7 @@ implementation:
                 mapping[cat.name] = comps
             return mapping
 
-        # ----------------- Inputs (hard-coded dataset root via env) -----------------
-        # SRC_DIR is exported by the shell after download+unzip.
+        # -------- Inputs (hard-coded dataset root via env) --------
         src_root_env = os.environ.get("SRC_DIR", "").strip()
         src_root = Path(src_root_env) if src_root_env else Path("/ui_components_temp/Classification_Dataset")
         print(f"[INFO] Using source root: {src_root}")
@@ -172,7 +161,7 @@ implementation:
         if not categories:
             raise SystemExit(f"No category folders found under: {src_root}")
 
-        # ----------------- Split & transfer -----------------
+        # -------- Split & transfer --------
         for cat in categories:
             components = [d for d in cat.iterdir() if d.is_dir()]
             if not components:
@@ -200,7 +189,7 @@ implementation:
                 for f in test_files:
                     transfer(f, out_root / "test" / cat.name / comp.name, move=move_files)
 
-        # ----------------- Manifest & metadata -----------------
+        # -------- Manifest & metadata --------
         rows = []
         for split in ["train", "val", "test"]:
             split_dir = out_root / split
@@ -228,13 +217,12 @@ implementation:
         components_path = out_root / "components_mapping.json"
         components_path.write_text(json.dumps(comp_map, indent=2))
 
-        # ----------------- Save Kubeflow outputs -----------------
+        # -------- Save Kubeflow outputs --------
         def _makedirs_for(path_str: str):
             p = Path(path_str)
             p.parent.mkdir(parents=True, exist_ok=True)
             return p
 
-        # Train/Test/Val descriptors as pickles (lightweight pointers)
         with open(_makedirs_for(args.train_data), "wb") as f:
             pickle.dump({
                 "data_path": str(out_root / "train"),
@@ -262,7 +250,6 @@ implementation:
                 "split": "val"
             }, f)
 
-        # Additional outputs as pickled data/paths
         with open(_makedirs_for(args.dataset_manifest), "wb") as f:
             pickle.dump(manifest, f)
 
