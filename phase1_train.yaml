@@ -66,11 +66,25 @@ implementation:
 
         def list_images_under_category(category_dir: Path):
             files = []
+            print(f"Searching for images in category dir: {category_dir}")
+            
+            if not category_dir.exists():
+                print(f"Category directory does not exist: {category_dir}")
+                return files
+                
+            # Check if images are directly in the category directory
+            for f in category_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in IMG_EXTS:
+                    files.append(f)
+                    
+            # Also check subdirectories (original logic)
             for comp_dir in category_dir.iterdir():
                 if comp_dir.is_dir():
                     for f in comp_dir.iterdir():
                         if f.is_file() and f.suffix.lower() in IMG_EXTS:
                             files.append(f)
+                            
+            print(f"Found {len(files)} images in {category_dir}")
             return files
 
         class UICategoryDataset(Dataset):
@@ -78,14 +92,46 @@ implementation:
                 self.transform = transform
                 self.samples = []
                 self.category_to_idx = category_to_idx
+                
+                print(f"Initializing dataset from: {split_root}")
+                print(f"Split root exists: {split_root.exists()}")
+                
+                if split_root.exists():
+                    print(f"Contents of {split_root}:")
+                    for item in split_root.iterdir():
+                        print(f"  {item} ({'dir' if item.is_dir() else 'file'})")
+                
                 for cat in sorted(category_to_idx.keys()):
                     cat_dir = split_root / cat
+                    print(f"Looking for category '{cat}' in: {cat_dir}")
                     if not cat_dir.exists(): 
+                        print(f"Category directory '{cat}' not found, skipping...")
                         continue
-                    for img_path in list_images_under_category(cat_dir):
+                    images = list_images_under_category(cat_dir)
+                    for img_path in images:
                         self.samples.append((img_path, category_to_idx[cat]))
+                    print(f"Added {len(images)} images for category '{cat}'")
+                
+                print(f"Total samples found: {len(self.samples)}")
                 if len(self.samples) == 0:
-                    raise RuntimeError(f"No images found under {split_root}.")
+                    # Let's explore the directory structure to understand the issue
+                    print("\nDebugging directory structure:")
+                    def explore_dir(path, max_depth=3, current_depth=0):
+                        if current_depth >= max_depth:
+                            return
+                        try:
+                            for item in path.iterdir():
+                                indent = "  " * current_depth
+                                if item.is_dir():
+                                    print(f"{indent}{item.name}/")
+                                    explore_dir(item, max_depth, current_depth + 1)
+                                else:
+                                    print(f"{indent}{item.name}")
+                        except PermissionError:
+                            print(f"{indent}[Permission Denied]")
+                    
+                    explore_dir(split_root)
+                    raise RuntimeError(f"No images found under {split_root}. Check directory structure above.")
 
             def __len__(self):
                 return len(self.samples)
