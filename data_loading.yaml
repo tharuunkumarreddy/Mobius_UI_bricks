@@ -68,7 +68,7 @@ implementation:
         echo "Forwarded container args (for debugging):" "$@"
 
         # ---- Run processing script; "$@" forwards KFP/Elyra flags if present ----
-        python - "$@" <<'PY'
+        python - <<'PY' "$@"
         #!/usr/bin/env python3
         import argparse, json, random, shutil, os, pickle, sys
         from pathlib import Path
