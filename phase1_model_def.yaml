@@ -67,8 +67,8 @@ implementation:
             # Save meta data including categories and model config
             meta = {
                 "image_size": args.image_size,
-                "mean": weights.transforms().mean.tolist(),
-                "std": weights.transforms().std.tolist(),
+                "mean": list(weights.transforms().mean),
+                "std": list(weights.transforms().std),
                 "num_classes": num_classes,
                 "categories": categories
             }
