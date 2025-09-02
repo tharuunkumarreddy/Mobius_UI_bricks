@@ -50,7 +50,41 @@ implementation:
             install_package("Pillow")
             from PIL import Image
         
+        # Also ensure we can handle compressed files
+        import zipfile
+        import tarfile
+        import shutil
+        
         IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+        def extract_if_compressed(file_path, extract_to):
+            """Extract compressed file if needed and return the directory path"""
+            file_path = Path(file_path)
+            extract_to = Path(extract_to)
+            
+            if not file_path.is_file():
+                return file_path  # Return as-is if it's not a file
+                
+            print(f"Attempting to extract {file_path} to {extract_to}")
+            extract_to.mkdir(parents=True, exist_ok=True)
+            
+            try:
+                if file_path.suffix.lower() in ['.zip']:
+                    with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                        zip_ref.extractall(extract_to)
+                    print(f"Extracted ZIP file to {extract_to}")
+                    return extract_to
+                elif file_path.suffix.lower() in ['.tar', '.tar.gz', '.tgz']:
+                    with tarfile.open(file_path, 'r:*') as tar_ref:
+                        tar_ref.extractall(extract_to)
+                    print(f"Extracted TAR file to {extract_to}")
+                    return extract_to
+                else:
+                    print(f"File {file_path} is not a supported compressed format")
+                    return file_path
+            except Exception as e:
+                print(f"Error extracting {file_path}: {e}")
+                return file_path
 
         def set_seed(seed=42):
             random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
@@ -207,34 +241,67 @@ implementation:
         print(f"Using device: {device}")
 
         # Build datasets/loaders - handle Kubeflow's /data subdirectory
-        train_path = Path(args.train_dataset)
-        val_path = Path(args.val_dataset)
+        train_input = Path(args.train_dataset)
+        val_input = Path(args.val_dataset)
         
-        # Check if data is in subdirectory (common in Kubeflow)
-        if (train_path / "data").exists():
-            train_path = train_path / "data"
-        if (val_path / "data").exists():
-            val_path = val_path / "data"
+        # Handle the /data file/directory structure
+        if (train_input / "data").exists():
+            train_data_path = train_input / "data"
+        else:
+            train_data_path = train_input
             
-        print(f"Using train path: {train_path}")
-        print(f"Using val path: {val_path}")
+        if (val_input / "data").exists():
+            val_data_path = val_input / "data"
+        else:
+            val_data_path = val_input
+            
+        print(f"Train data path: {train_data_path}")
+        print(f"Val data path: {val_data_path}")
+        print(f"Train is file: {train_data_path.is_file()}")
+        print(f"Val is file: {val_data_path.is_file()}")
         
-        # Check if paths exist and list contents for debugging
-        if not train_path.exists():
-            print(f"Train path does not exist: {train_path}")
-            print(f"Available paths in {args.train_dataset}:")
-            for p in Path(args.train_dataset).iterdir():
-                print(f"  - {p}")
+        # Extract if compressed files
+        if train_data_path.is_file():
+            print("Train dataset appears to be a file - attempting extraction")
+            train_path = extract_if_compressed(train_data_path, train_input / "extracted_train")
+        else:
+            train_path = train_data_path
+            
+        if val_data_path.is_file():
+            print("Val dataset appears to be a file - attempting extraction")  
+            val_path = extract_if_compressed(val_data_path, val_input / "extracted_val")
+        else:
+            val_path = val_data_path
+            
+        print(f"Final train path: {train_path}")
+        print(f"Final val path: {val_path}")
+        
+        # Check if paths are now directories
+        if not train_path.is_dir():
+            print(f"ERROR: Train path is still not a directory: {train_path}")
+            print("Contents of train input directory:")
+            try:
+                for item in train_input.iterdir():
+                    item_type = "DIR" if item.is_dir() else "FILE"
+                    size = f" ({item.stat().st_size} bytes)" if item.is_file() else ""
+                    print(f"  {item_type}: {item.name}{size}")
+            except Exception as e:
+                print(f"Error listing directory: {e}")
             exit(1)
             
-        if not val_path.exists():
-            print(f"Val path does not exist: {val_path}")
-            print(f"Available paths in {args.val_dataset}:")
-            for p in Path(args.val_dataset).iterdir():
-                print(f"  - {p}")
+        if not val_path.is_dir():
+            print(f"ERROR: Val path is still not a directory: {val_path}")
+            print("Contents of val input directory:")
+            try:
+                for item in val_input.iterdir():
+                    item_type = "DIR" if item.is_dir() else "FILE"
+                    size = f" ({item.stat().st_size} bytes)" if item.is_file() else ""
+                    print(f"  {item_type}: {item.name}{size}")
+            except Exception as e:
+                print(f"Error listing directory: {e}")
             exit(1)
         
-        # Debug: Show actual directory structure
+        # Show directory structure
         print("=== DEBUG: Train dataset structure ===")
         def show_directory_structure(path, max_depth=3, current_depth=0):
             if current_depth >= max_depth:
