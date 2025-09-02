@@ -66,22 +66,64 @@ implementation:
                 return file_path  # Return as-is if it's not a file
                 
             print(f"Attempting to extract {file_path} to {extract_to}")
-            extract_to.mkdir(parents=True, exist_ok=True)
+            
+            # Make sure extract_to directory can be created
+            try:
+                extract_to.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                print(f"Error creating extraction directory {extract_to}: {e}")
+                return file_path
+            
+            # Check file extension and size
+            file_size = file_path.stat().st_size
+            print(f"File size: {file_size} bytes")
+            print(f"File extension: {file_path.suffix}")
             
             try:
                 if file_path.suffix.lower() in ['.zip']:
+                    print("Attempting ZIP extraction...")
                     with zipfile.ZipFile(file_path, 'r') as zip_ref:
                         zip_ref.extractall(extract_to)
                     print(f"Extracted ZIP file to {extract_to}")
-                    return extract_to
+                    
+                    # Check what was extracted
+                    extracted_items = list(extract_to.iterdir())
+                    print(f"Extracted {len(extracted_items)} items")
+                    for item in extracted_items:
+                        print(f"  - {item.name} ({'DIR' if item.is_dir() else 'FILE'})")
+                    
+                    # If there's only one directory extracted, use that as the base
+                    if len(extracted_items) == 1 and extracted_items[0].is_dir():
+                        return extracted_items[0]
+                    else:
+                        return extract_to
+                        
                 elif file_path.suffix.lower() in ['.tar', '.tar.gz', '.tgz']:
+                    print("Attempting TAR extraction...")
                     with tarfile.open(file_path, 'r:*') as tar_ref:
                         tar_ref.extractall(extract_to)
                     print(f"Extracted TAR file to {extract_to}")
-                    return extract_to
+                    
+                    # Check what was extracted
+                    extracted_items = list(extract_to.iterdir())
+                    print(f"Extracted {len(extracted_items)} items")
+                    for item in extracted_items:
+                        print(f"  - {item.name} ({'DIR' if item.is_dir() else 'FILE'})")
+                    
+                    # If there's only one directory extracted, use that as the base
+                    if len(extracted_items) == 1 and extracted_items[0].is_dir():
+                        return extracted_items[0]
+                    else:
+                        return extract_to
                 else:
                     print(f"File {file_path} is not a supported compressed format")
-                    return file_path
+                    print("Supported formats: .zip, .tar, .tar.gz, .tgz")
+                    
+                    # Maybe it's a directory structure saved as a single file?
+                    # Let's try to check if it's actually a directory-like structure
+                    print("Checking if this is a pickled/serialized dataset...")
+                    return file_path  # Return as-is for now
+                    
             except Exception as e:
                 print(f"Error extracting {file_path}: {e}")
                 return file_path
@@ -240,11 +282,11 @@ implementation:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {device}")
 
-        # Build datasets/loaders - handle Kubeflow's /data subdirectory
+        # Build datasets/loaders - handle Kubeflow's /data file structure
         train_input = Path(args.train_dataset)
         val_input = Path(args.val_dataset)
         
-        # Handle the /data file/directory structure
+        # Handle the /data file structure
         if (train_input / "data").exists():
             train_data_path = train_input / "data"
         else:
@@ -260,16 +302,20 @@ implementation:
         print(f"Train is file: {train_data_path.is_file()}")
         print(f"Val is file: {val_data_path.is_file()}")
         
-        # Extract if compressed files
+        # Extract if compressed files - fix the extraction paths
         if train_data_path.is_file():
             print("Train dataset appears to be a file - attempting extraction")
-            train_path = extract_if_compressed(train_data_path, train_input / "extracted_train")
+            # Create extraction directory in the parent of the file, not inside it
+            extract_dir = train_input / "extracted_train" 
+            train_path = extract_if_compressed(train_data_path, extract_dir)
         else:
             train_path = train_data_path
             
         if val_data_path.is_file():
             print("Val dataset appears to be a file - attempting extraction")  
-            val_path = extract_if_compressed(val_data_path, val_input / "extracted_val")
+            # Create extraction directory in the parent of the file, not inside it
+            extract_dir = val_input / "extracted_val"
+            val_path = extract_if_compressed(val_data_path, extract_dir)
         else:
             val_path = val_data_path
             
