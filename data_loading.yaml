@@ -36,6 +36,8 @@ implementation:
         mkdir -p "$WORKDIR"
 
         echo "Downloading Kaggle dataset to $WORKDIR ..."
+        echo "Dataset URL:"
+        echo "https://www.kaggle.com/datasets/chtharunkumarreddy09/classification-dataset-4"
         kaggle datasets download -d chtharunkumarreddy09/classification-dataset-4 -p "$WORKDIR" --force
 
         ZIP_PATH="$(ls -1 "$WORKDIR"/*.zip | head -n1 || true)"
@@ -63,7 +65,9 @@ implementation:
         echo "Detected dataset root: $SRC_DIR"
         export SRC_DIR
 
-        # ---- Run processing script (note: "$@" forwards KFP args) ----
+        echo "Forwarded container args (for debugging):" "$@"
+
+        # ---- Run processing script; "$@" forwards KFP/Elyra flags if present ----
         python - "$@" <<'PY'
         #!/usr/bin/env python3
         import argparse, json, random, shutil, os, pickle, sys
@@ -71,13 +75,17 @@ implementation:
         from math import floor
         import pandas as pd
 
+        # Defaults that match KFP container contract (so args become optional)
+        def _kfp_out(name: str) -> str:
+            return f"/tmp/outputs/{name}/data"
+
         parser = argparse.ArgumentParser()
-        parser.add_argument('--train_data', type=str, required=True)
-        parser.add_argument('--test_data', type=str, required=True)
-        parser.add_argument('--val_data', type=str, required=True)
-        parser.add_argument('--dataset_manifest', type=str, required=True)
-        parser.add_argument('--categories_json', type=str, required=True)
-        parser.add_argument('--components_mapping', type=str, required=True)
+        parser.add_argument('--train_data', type=str, default=_kfp_out("train_data"))
+        parser.add_argument('--test_data', type=str, default=_kfp_out("test_data"))
+        parser.add_argument('--val_data', type=str, default=_kfp_out("val_data"))
+        parser.add_argument('--dataset_manifest', type=str, default=_kfp_out("dataset_manifest"))
+        parser.add_argument('--categories_json', type=str, default=_kfp_out("categories_json"))
+        parser.add_argument('--components_mapping', type=str, default=_kfp_out("components_mapping"))
         args = parser.parse_args()
 
         ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -131,6 +139,7 @@ implementation:
                 mapping[cat.name] = comps
             return mapping
 
+        # Source dataset root from env (set by shell after unzip)
         src_root_env = os.environ.get("SRC_DIR", "").strip()
         src_root = Path(src_root_env) if src_root_env else Path("/ui_components_temp/Classification_Dataset")
         print(f"[INFO] Using source root: {src_root}")
@@ -204,7 +213,7 @@ implementation:
         components_path = out_root / "components_mapping.json"
         components_path.write_text(json.dumps(comp_map, indent=2))
 
-        def _makedirs_for(path_str: str):
+        def _makedirs_for(path_str: str) -> Path:
             p = Path(path_str)
             p.parent.mkdir(parents=True, exist_ok=True)
             return p
@@ -239,7 +248,6 @@ implementation:
         with open(_makedirs_for(args.components_mapping), "wb") as f:
             pickle.dump(comp_map, f)
 
-        echo_paths = [str(manifest_path), str(categories_path), str(components_path)]
         print("Output tree root:", out_root)
         print("Manifest saved to:", manifest_path)
         print("Categories saved to:", categories_path)
