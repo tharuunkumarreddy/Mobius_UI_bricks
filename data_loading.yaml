@@ -11,48 +11,64 @@ implementation:
   container:
     image: python:3.9
     command:
-      - sh
-      - -c
+      - bash
+      - -ec
       - |
-        set -e
-        apt-get update && apt-get install -y git unzip wget
-        pip install pandas numpy pathlib kaggle
-        
-        # Setup Kaggle credentials and download dataset
-        mkdir -p ~/.kaggle
-        # Note: In production, Kaggle credentials should be mounted as secrets
-        # For now, using public dataset access
-        
-        WORKDIR="ui_components_temp"
-        DATASET_URL="https://www.kaggle.com/datasets/chtharunkumarreddy09/classification-dataset-4"
-        
-        mkdir -p $WORKDIR
-        cd $WORKDIR
-        
-        # Download and extract dataset (replace with actual Kaggle dataset)
-        # kaggle datasets download -d your-username/ui-components-dataset
-        # unzip ui-components-dataset.zip
-        
-        # For demo purposes, create the expected directory structure
-        mkdir -p Classification_Dataset
-        
-        cd /
-        
-        exec "$0" "$@"
-      - python3
-      - -u
-      - -c
-      - |
-        import argparse
-        import json
-        import random
-        import shutil
-        import os
-        import pickle
+        set -euo pipefail
+
+        # ---- System & Python deps ----
+        apt-get update -y && apt-get install -y unzip wget
+        python -m pip install --no-cache-dir --upgrade pip
+        python -m pip install --no-cache-dir kaggle pandas
+
+        # ---- Kaggle download ----
+        WORKDIR="/ui_components_temp"
+        mkdir -p "$WORKDIR"
+
+        # Expect kaggle.json to be mounted at /root/.kaggle/kaggle.json
+        if [ ! -f /root/.kaggle/kaggle.json ]; then
+          echo "ERROR: Missing /root/.kaggle/kaggle.json (mount your Kaggle API credentials)." >&2
+          exit 1
+        fi
+        chmod 600 /root/.kaggle/kaggle.json
+
+        echo "Downloading Kaggle dataset to $WORKDIR ..."
+        kaggle datasets download -d chtharunkumarreddy09/classification-dataset-4 -p "$WORKDIR" --force
+        ZIP_PATH="$(ls -1 "$WORKDIR"/*.zip | head -n1)"
+        if [ -z "$ZIP_PATH" ]; then
+          echo "ERROR: Zip not found after download." >&2
+          exit 1
+        fi
+
+        echo "Unzipping $ZIP_PATH ..."
+        unzip -q "$ZIP_PATH" -d "$WORKDIR"
+
+        # Try to locate the extracted dataset root directory.
+        # We prefer a directory named 'Classification_Dataset' if present.
+        if SRC_DIR="$(find "$WORKDIR" -type d -name 'Classification_Dataset' -print -quit)"; then
+          :
+        else
+          # Fallback: pick the first subdirectory created by unzip
+          SRC_DIR="$(find "$WORKDIR" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
+        fi
+
+        if [ -z "$SRC_DIR" ] || [ ! -d "$SRC_DIR" ]; then
+          echo "ERROR: Could not locate extracted dataset directory under $WORKDIR." >&2
+          find "$WORKDIR" -maxdepth 2 -type d -print >&2 || true
+          exit 1
+        fi
+
+        echo "Detected dataset root: $SRC_DIR"
+        export SRC_DIR
+
+        # ---- Run processing script ----
+        python - << 'PY'
+        import argparse, json, random, shutil, os
         from pathlib import Path
         from math import floor
         import pandas as pd
 
+        # ----------------- Parser (kept consistent with your args) -----------------
         parser = argparse.ArgumentParser()
         parser.add_argument('--train_data', type=str, required=True)
         parser.add_argument('--test_data', type=str, required=True)
@@ -62,65 +78,77 @@ implementation:
         parser.add_argument('--components_mapping', type=str, required=True)
         args = parser.parse_args()
 
+        # ----------------- Logic -----------------
         ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
         def list_images(folder: Path):
-            return [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in ALLOWED_EXTS]
+          return [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in ALLOWED_EXTS]
 
         def ensure_dirs(p: Path):
-            p.mkdir(parents=True, exist_ok=True)
+          p.mkdir(parents=True, exist_ok=True)
 
         def transfer(src: Path, dst_dir: Path, move: bool):
-            ensure_dirs(dst_dir)
-            if move:
-                shutil.move(str(src), str(dst_dir / src.name))
-            else:
-                shutil.copy2(src, dst_dir / src.name)
+          ensure_dirs(dst_dir)
+          if move:
+            shutil.move(str(src), str(dst_dir / src.name))
+          else:
+            shutil.copy2(src, dst_dir / src.name)
 
         def is_category_dir(d: Path):
-            return d.is_dir() and any(child.is_dir() for child in d.iterdir())
+          return d.is_dir() and any(child.is_dir() for child in d.iterdir())
 
         def get_categories(root: Path):
-            cats = [d for d in root.iterdir() if is_category_dir(d)]
-            if not cats:
-                candidates = [d for d in root.iterdir() if d.is_dir()]
-                for d in candidates:
-                    deeper = [x for x in d.iterdir() if is_category_dir(x)]
-                    if deeper:
-                        return deeper
-            return cats
+          # Return directories that contain subdirectories (i.e., category dirs)
+          cats = [d for d in root.iterdir() if is_category_dir(d)]
+          if not cats:
+            # Try one level deeper if the archive added an extra top folder
+            candidates = [d for d in root.iterdir() if d.is_dir()]
+            for d in candidates:
+              deeper = [x for x in d.iterdir() if is_category_dir(x)]
+              if deeper:
+                return deeper
+          return cats
 
         def safe_split(n, tr, va, te):
-            base_tr = floor(n * tr)
-            base_va = floor(n * va)
-            base_te = floor(n * te)
-            leftover = n - (base_tr + base_va + base_te)
-            parts = [("train", tr), ("val", va), ("test", te)]
-            parts.sort(key=lambda x: x[1], reverse=True)
-            counts = {"train": base_tr, "val": base_va, "test": base_te}
-            for name, _ in parts:
-                if leftover <= 0: break
-                counts[name] += 1
-                leftover -= 1
-            return counts["train"], counts["val"], counts["test"]
+          from math import floor
+          base_tr = floor(n * tr)
+          base_va = floor(n * va)
+          base_te = floor(n * te)
+          leftover = n - (base_tr + base_va + base_te)
+          parts = [("train", tr), ("val", va), ("test", te)]
+          parts.sort(key=lambda x: x[1], reverse=True)
+          counts = {"train": base_tr, "val": base_va, "test": base_te}
+          for name, _ in parts:
+            if leftover <= 0: break
+            counts[name] += 1
+            leftover -= 1
+          return counts["train"], counts["val"], counts["test"]
 
         def discover_components(train_root: Path):
-            mapping = {}
-            if not train_root.exists():
-                return mapping
-            for cat in sorted([d for d in train_root.iterdir() if d.is_dir()]):
-                comps = [x.name for x in sorted(cat.iterdir()) if x.is_dir()]
-                mapping[cat.name] = comps
+          mapping = {}
+          if not train_root.exists():
             return mapping
+          for cat in sorted([d for d in train_root.iterdir() if d.is_dir()]):
+            comps = [x.name for x in sorted(cat.iterdir()) if x.is_dir()]
+            mapping[cat.name] = comps
+          return mapping
 
-        # Main processing logic
-        src_root = Path("/ui_components_temp/Classification_Dataset")
+        # ---- Locate dataset root from env (set by shell) with a robust fallback ----
+        src_root_env = os.environ.get("SRC_DIR", "").strip()
+        src_root = Path(src_root_env) if src_root_env else Path("/ui_components_temp/Classification_Dataset")
+
+        if not src_root.exists():
+          # Last-chance fallback: if /ui_components_temp has exactly one directory, use it.
+          base = Path("/ui_components_temp")
+          subs = [d for d in base.iterdir() if d.is_dir()]
+          if len(subs) == 1:
+            src_root = subs[0]
+
+        print(f"[INFO] Using source root: {src_root}")
+
         out_root = Path("/tmp/processed_data")
-        train_ratio = 0.70
-        val_ratio = 0.15
-        test_ratio = 0.15
-        seed = 42
-        move_files = False
+        train_ratio, val_ratio, test_ratio = 0.70, 0.15, 0.15
+        seed, move_files = 42, False
 
         assert abs((train_ratio + val_ratio + test_ratio) - 1.0) < 1e-6, "Ratios must sum to 1.0"
         random.seed(seed)
@@ -128,127 +156,105 @@ implementation:
 
         categories = get_categories(src_root)
         if not categories:
-            raise SystemExit(f"No category folders found under: {src_root}")
+          raise SystemExit(f"No category folders found under: {src_root}")
 
-        stats = []
         for cat in categories:
-            components = [d for d in cat.iterdir() if d.is_dir()]
-            if not components:
-                print(f"[WARN] No component folders in category: {cat.name}")
-                continue
+          components = [d for d in cat.iterdir() if d.is_dir()]
+          if not components:
+            print(f"[WARN] No component folders in category: {cat.name}")
+            continue
 
-            for comp in components:
-                imgs = list_images(comp)
-                if not imgs:
-                    print(f"[WARN] No images in: {cat.name}/{comp.name}")
-                    continue
+          for comp in components:
+            imgs = list_images(comp)
+            if not imgs:
+              print(f"[WARN] No images in: {cat.name}/{comp.name}")
+              continue
 
-                random.shuffle(imgs)
-                n = len(imgs)
-                n_tr, n_va, n_te = safe_split(n, train_ratio, val_ratio, test_ratio)
+            random.shuffle(imgs)
+            n = len(imgs)
+            n_tr, n_va, n_te = safe_split(n, train_ratio, val_ratio, test_ratio)
 
-                train_files = imgs[:n_tr]
-                val_files   = imgs[n_tr:n_tr+n_va]
-                test_files  = imgs[n_tr+n_va:n_tr+n_va+n_te]
+            train_files = imgs[:n_tr]
+            val_files   = imgs[n_tr:n_tr+n_va]
+            test_files  = imgs[n_tr+n_va:n_tr+n_va+n_te]
 
-                for f in train_files:
-                    transfer(f, out_root / "train" / cat.name / comp.name, move=move_files)
-                for f in val_files:
-                    transfer(f, out_root / "val" / cat.name / comp.name, move=move_files)
-                for f in test_files:
-                    transfer(f, out_root / "test" / cat.name / comp.name, move=move_files)
+            for f in train_files:
+              transfer(f, out_root / "train" / cat.name / comp.name, move=move_files)
+            for f in val_files:
+              transfer(f, out_root / "val" / cat.name / comp.name, move=move_files)
+            for f in test_files:
+              transfer(f, out_root / "test" / cat.name / comp.name, move=move_files)
 
-                stats.append((cat.name, comp.name, n, len(train_files), len(val_files), len(test_files)))
-
-        # Create manifest
+        # Manifest
         rows = []
         for split in ["train", "val", "test"]:
-            split_dir = out_root / split
-            if not split_dir.exists(): 
-                continue
-            for cat in sorted([d for d in split_dir.iterdir() if d.is_dir()]):
-                for comp in sorted([c for c in cat.iterdir() if c.is_dir()]):
-                    for img in comp.iterdir():
-                        if img.suffix.lower() in ALLOWED_EXTS:
-                            rows.append({
-                                "path": str(img),
-                                "split": split,
-                                "category": cat.name,
-                                "component": comp.name
-                            })
-        
+          split_dir = out_root / split
+          if not split_dir.exists(): 
+            continue
+          for cat in sorted([d for d in split_dir.iterdir() if d.is_dir()]):
+            for comp in sorted([c for c in cat.iterdir() if c.is_dir()]):
+              for img in comp.iterdir():
+                if img.suffix.lower() in ALLOWED_EXTS:
+                  rows.append({"path": str(img), "split": split, "category": cat.name, "component": comp.name})
+
         manifest = pd.DataFrame(rows)
         manifest_path = out_root / "dataset_manifest.csv"
         manifest.to_csv(manifest_path, index=False)
 
-        # Create categories.json (from train/)
+        # categories.json (from train/)
         cats = sorted([d.name for d in (out_root / "train").iterdir() if d.is_dir()]) if (out_root / "train").exists() else []
         categories_path = out_root / "categories.json"
         categories_path.write_text(json.dumps(cats, indent=2))
 
-        # Create components_mapping.json (from train/)
+        # components_mapping.json (from train/)
         comp_map = discover_components(out_root / "train")
         components_path = out_root / "components_mapping.json"
         components_path.write_text(json.dumps(comp_map, indent=2))
 
-        # Prepare output datasets for Kubeflow
-        # Create train dataset
-        train_data = {
-            "data_path": str(out_root / "train"),
-            "manifest_path": str(manifest_path),
-            "categories": cats,
-            "components_mapping": comp_map,
-            "split": "train"
-        }
+        # Save outputs (pickled descriptors) to Kubeflow output paths
+        import pickle, os
         os.makedirs(os.path.dirname(args.train_data), exist_ok=True)
         with open(args.train_data, "wb") as f:
-            pickle.dump(train_data, f)
+          pickle.dump({"data_path": str(out_root / "train"),
+                       "manifest_path": str(manifest_path),
+                       "categories": cats,
+                       "components_mapping": comp_map,
+                       "split": "train"}, f)
 
-        # Create test dataset
-        test_data = {
-            "data_path": str(out_root / "test"),
-            "manifest_path": str(manifest_path),
-            "categories": cats,
-            "components_mapping": comp_map,
-            "split": "test"
-        }
         os.makedirs(os.path.dirname(args.test_data), exist_ok=True)
         with open(args.test_data, "wb") as f:
-            pickle.dump(test_data, f)
+          pickle.dump({"data_path": str(out_root / "test"),
+                       "manifest_path": str(manifest_path),
+                       "categories": cats,
+                       "components_mapping": comp_map,
+                       "split": "test"}, f)
 
-        # Create validation dataset
-        val_data = {
-            "data_path": str(out_root / "val"),
-            "manifest_path": str(manifest_path),
-            "categories": cats,
-            "components_mapping": comp_map,
-            "split": "val"
-        }
         os.makedirs(os.path.dirname(args.val_data), exist_ok=True)
         with open(args.val_data, "wb") as f:
-            pickle.dump(val_data, f)
+          pickle.dump({"data_path": str(out_root / "val"),
+                       "manifest_path": str(manifest_path),
+                       "categories": cats,
+                       "components_mapping": comp_map,
+                       "split": "val"}, f)
 
-        # Save manifest as dataset
         os.makedirs(os.path.dirname(args.dataset_manifest), exist_ok=True)
         with open(args.dataset_manifest, "wb") as f:
-            pickle.dump(manifest, f)
+          pickle.dump(manifest, f)
 
-        # Save categories as dataset
         os.makedirs(os.path.dirname(args.categories_json), exist_ok=True)
         with open(args.categories_json, "wb") as f:
-            pickle.dump(cats, f)
+          pickle.dump(cats, f)
 
-        # Save components mapping as dataset
         os.makedirs(os.path.dirname(args.components_mapping), exist_ok=True)
         with open(args.components_mapping, "wb") as f:
-            pickle.dump(comp_map, f)
+          pickle.dump(comp_map, f)
 
         print("Output tree root:", out_root)
         print("Manifest saved to:", manifest_path)
         print("Categories saved to:", categories_path)
         print("Components mapping saved to:", components_path)
         print("Successfully processed and saved UI Components dataset.")
-
+        PY
     args:
       - --train_data
       - {outputPath: train_data}
