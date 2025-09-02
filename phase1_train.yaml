@@ -20,16 +20,8 @@ implementation:
       - sh
       - -c
       - |
-        # Update package manager and install system dependencies
-        apt-get update && apt-get install -y build-essential
-        
-        # Install Python packages with proper error handling
-        pip install --upgrade pip
-        pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
-        pip install --no-cache-dir pillow numpy scikit-learn
-        
-        # Verify installations
-        python3 -c "import torch, torchvision, numpy, sklearn; print('All packages installed successfully')"
+        # Install required dependencies
+        pip install torch torchvision pillow numpy scikit-learn --index-url https://download.pytorch.org/whl/cpu
         
         exec "$0" "$@"
       - python3
@@ -66,25 +58,11 @@ implementation:
 
         def list_images_under_category(category_dir: Path):
             files = []
-            print(f"Searching for images in category dir: {category_dir}")
-            
-            if not category_dir.exists():
-                print(f"Category directory does not exist: {category_dir}")
-                return files
-                
-            # Check if images are directly in the category directory
-            for f in category_dir.iterdir():
-                if f.is_file() and f.suffix.lower() in IMG_EXTS:
-                    files.append(f)
-                    
-            # Also check subdirectories (original logic)
             for comp_dir in category_dir.iterdir():
                 if comp_dir.is_dir():
                     for f in comp_dir.iterdir():
                         if f.is_file() and f.suffix.lower() in IMG_EXTS:
                             files.append(f)
-                            
-            print(f"Found {len(files)} images in {category_dir}")
             return files
 
         class UICategoryDataset(Dataset):
@@ -93,45 +71,17 @@ implementation:
                 self.samples = []
                 self.category_to_idx = category_to_idx
                 
-                print(f"Initializing dataset from: {split_root}")
-                print(f"Split root exists: {split_root.exists()}")
+                # Handle the case where split_root is the actual data directory
+                if split_root.is_dir():
+                    for cat in sorted(category_to_idx.keys()):
+                        cat_dir = split_root / cat
+                        if not cat_dir.exists(): 
+                            continue
+                        for img_path in list_images_under_category(cat_dir):
+                            self.samples.append((img_path, category_to_idx[cat]))
                 
-                if split_root.exists():
-                    print(f"Contents of {split_root}:")
-                    for item in split_root.iterdir():
-                        print(f"  {item} ({'dir' if item.is_dir() else 'file'})")
-                
-                for cat in sorted(category_to_idx.keys()):
-                    cat_dir = split_root / cat
-                    print(f"Looking for category '{cat}' in: {cat_dir}")
-                    if not cat_dir.exists(): 
-                        print(f"Category directory '{cat}' not found, skipping...")
-                        continue
-                    images = list_images_under_category(cat_dir)
-                    for img_path in images:
-                        self.samples.append((img_path, category_to_idx[cat]))
-                    print(f"Added {len(images)} images for category '{cat}'")
-                
-                print(f"Total samples found: {len(self.samples)}")
                 if len(self.samples) == 0:
-                    # Let's explore the directory structure to understand the issue
-                    print("\nDebugging directory structure:")
-                    def explore_dir(path, max_depth=3, current_depth=0):
-                        if current_depth >= max_depth:
-                            return
-                        try:
-                            for item in path.iterdir():
-                                indent = "  " * current_depth
-                                if item.is_dir():
-                                    print(f"{indent}{item.name}/")
-                                    explore_dir(item, max_depth, current_depth + 1)
-                                else:
-                                    print(f"{indent}{item.name}")
-                        except PermissionError:
-                            print(f"{indent}[Permission Denied]")
-                    
-                    explore_dir(split_root)
-                    raise RuntimeError(f"No images found under {split_root}. Check directory structure above.")
+                    raise RuntimeError(f"No images found under {split_root}.")
 
             def __len__(self):
                 return len(self.samples)
@@ -189,58 +139,25 @@ implementation:
 
             # Load dataset paths from pickle files
             def load_dataset_path(dataset_pickle_path):
-                print(f"Loading dataset from: {dataset_pickle_path}")
-                try:
-                    with open(dataset_pickle_path, 'rb') as f:
-                        dataset_info = pickle.load(f)
-                    if isinstance(dataset_info, dict) and 'data_path' in dataset_info:
-                        path = Path(dataset_info['data_path'])
-                        print(f"Extracted data_path: {path}")
-                        return path
-                    else:
-                        path = Path(dataset_pickle_path)
-                        print(f"Using pickle path directly: {path}")
-                        return path
-                except Exception as e:
-                    print(f"Error loading dataset pickle {dataset_pickle_path}: {e}")
-                    # Fallback: treat as direct path
-                    path = Path(dataset_pickle_path)
-                    print(f"Fallback to direct path: {path}")
-                    return path
+                with open(dataset_pickle_path, 'rb') as f:
+                    dataset_info = pickle.load(f)
+                if isinstance(dataset_info, dict) and 'data_path' in dataset_info:
+                    return Path(dataset_info['data_path'])
+                else:
+                    return Path(dataset_pickle_path)
 
             train_path = load_dataset_path(args.train_data)
             val_path = load_dataset_path(args.val_data)
             test_path = load_dataset_path(args.test_data)
-            
-            print(f"Train path: {train_path}")
-            print(f"Val path: {val_path}")
-            print(f"Test path: {test_path}")
-            print(f"Model meta file: {args.model_meta}")
-            print(f"Model init file: {args.model_init}")
 
             # Load model metadata - handle both direct JSON and pickle file
             try:
-                # First try to load as JSON
-                with open(args.model_meta, 'r') as f:
-                    meta = json.load(f)
-                print("Loaded metadata as JSON")
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                # If JSON fails, try pickle
-                try:
+                if args.model_meta.endswith('.json'):
+                    with open(args.model_meta, 'r') as f:
+                        meta = json.load(f)
+                else:
                     with open(args.model_meta, 'rb') as f:
                         meta = pickle.load(f)
-                    print("Loaded metadata as pickle")
-                except Exception as e:
-                    print(f"Error loading model meta as both JSON and pickle: {e}")
-                    print(f"File path: {args.model_meta}")
-                    # Try to read first few bytes to debug
-                    try:
-                        with open(args.model_meta, 'rb') as f:
-                            first_bytes = f.read(50)
-                            print(f"First 50 bytes: {first_bytes}")
-                    except Exception:
-                        pass
-                    exit(1)
             except Exception as e:
                 print(f"Error loading model meta: {e}")
                 exit(1)
@@ -250,10 +167,6 @@ implementation:
             categories = meta["categories"]
             category_to_idx = {c:i for i,c in enumerate(categories)}
             idx_to_category = {i:c for c,i in category_to_idx.items()}
-
-            # Fix: Define dataset_root_path based on train_path
-            # Assume the structure is: dataset_root/train, dataset_root/val, dataset_root/test
-            dataset_root_path = train_path.parent if train_path.name == "train" else train_path
 
             print(f"Dataset root: {dataset_root_path}")
             print(f"Categories: {categories}")
@@ -277,8 +190,8 @@ implementation:
             print(f"Using device: {device}")
 
             # Build datasets/loaders
-            train_ds = UICategoryDataset(train_path, category_to_idx, transform=train_tfms)
-            val_ds = UICategoryDataset(val_path, category_to_idx, transform=eval_tfms)
+            train_ds = UICategoryDataset(dataset_root_path / "train", category_to_idx, transform=train_tfms)
+            val_ds = UICategoryDataset(dataset_root_path / "val", category_to_idx, transform=eval_tfms)
             train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                                       num_workers=args.num_workers, pin_memory=True)
             val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
@@ -315,7 +228,6 @@ implementation:
 
             # Training loop
             best_val_acc = 0.0
-            train_log_data = []
             print("Starting training...")
             
             for epoch in range(1, args.epochs + 1):
@@ -345,17 +257,6 @@ implementation:
                 val_loss, val_acc = evaluate(model, val_loader, device, criterion)
                 dt = time.time() - t0
                 
-                # Log epoch data
-                epoch_data = {
-                    "epoch": epoch,
-                    "train_loss": train_loss,
-                    "train_acc": train_acc,
-                    "val_loss": val_loss,
-                    "val_acc": val_acc,
-                    "duration": dt
-                }
-                train_log_data.append(epoch_data)
-                
                 print(f"Epoch {epoch:02d}/{args.epochs} | {dt:.1f}s | train loss {train_loss:.4f} acc {train_acc:.3f} | val loss {val_loss:.4f} acc {val_acc:.3f}")
 
                 if val_acc > best_val_acc:
@@ -378,9 +279,7 @@ implementation:
             # Save training log
             with open(args.train_log, 'w') as f:
                 json.dump({
-                    "best_val_acc": best_val_acc,
-                    "epochs": train_log_data,
-                    "total_epochs": args.epochs
+                    "best_val_acc": best_val_acc
                 }, f, indent=2)
 
             print(f"Training completed. Best val acc: {best_val_acc:.3f}")
