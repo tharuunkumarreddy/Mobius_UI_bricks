@@ -143,25 +143,58 @@ implementation:
 
             # Load dataset paths from pickle files
             def load_dataset_path(dataset_pickle_path):
-                with open(dataset_pickle_path, 'rb') as f:
-                    dataset_info = pickle.load(f)
-                if isinstance(dataset_info, dict) and 'data_path' in dataset_info:
-                    return Path(dataset_info['data_path'])
-                else:
-                    return Path(dataset_pickle_path)
+                print(f"Loading dataset from: {dataset_pickle_path}")
+                try:
+                    with open(dataset_pickle_path, 'rb') as f:
+                        dataset_info = pickle.load(f)
+                    if isinstance(dataset_info, dict) and 'data_path' in dataset_info:
+                        path = Path(dataset_info['data_path'])
+                        print(f"Extracted data_path: {path}")
+                        return path
+                    else:
+                        path = Path(dataset_pickle_path)
+                        print(f"Using pickle path directly: {path}")
+                        return path
+                except Exception as e:
+                    print(f"Error loading dataset pickle {dataset_pickle_path}: {e}")
+                    # Fallback: treat as direct path
+                    path = Path(dataset_pickle_path)
+                    print(f"Fallback to direct path: {path}")
+                    return path
 
             train_path = load_dataset_path(args.train_data)
             val_path = load_dataset_path(args.val_data)
             test_path = load_dataset_path(args.test_data)
+            
+            print(f"Train path: {train_path}")
+            print(f"Val path: {val_path}")
+            print(f"Test path: {test_path}")
+            print(f"Model meta file: {args.model_meta}")
+            print(f"Model init file: {args.model_init}")
 
             # Load model metadata - handle both direct JSON and pickle file
             try:
-                if args.model_meta.endswith('.json'):
-                    with open(args.model_meta, 'r') as f:
-                        meta = json.load(f)
-                else:
+                # First try to load as JSON
+                with open(args.model_meta, 'r') as f:
+                    meta = json.load(f)
+                print("Loaded metadata as JSON")
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                # If JSON fails, try pickle
+                try:
                     with open(args.model_meta, 'rb') as f:
                         meta = pickle.load(f)
+                    print("Loaded metadata as pickle")
+                except Exception as e:
+                    print(f"Error loading model meta as both JSON and pickle: {e}")
+                    print(f"File path: {args.model_meta}")
+                    # Try to read first few bytes to debug
+                    try:
+                        with open(args.model_meta, 'rb') as f:
+                            first_bytes = f.read(50)
+                            print(f"First 50 bytes: {first_bytes}")
+                    except Exception:
+                        pass
+                    exit(1)
             except Exception as e:
                 print(f"Error loading model meta: {e}")
                 exit(1)
