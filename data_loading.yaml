@@ -68,7 +68,7 @@ implementation:
         echo "Forwarded container args (for debugging):" "$@"
 
         # ---- Run processing script; "$@" forwards KFP/Elyra flags if present ----
-        python - <<'PY' "$@"
+        cat > /tmp/process_dataset.py <<'PY'
         #!/usr/bin/env python3
         import argparse, json, random, shutil, os, pickle, sys
         from pathlib import Path
@@ -254,6 +254,9 @@ implementation:
         print("Components mapping saved to:", components_path)
         print("Successfully processed and saved UI Components dataset.")
         PY
+
+        # Execute the Python script with the arguments
+        python /tmp/process_dataset.py "$@"
     args:
       - --train_data
       - {outputPath: train_data}
