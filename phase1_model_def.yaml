@@ -29,6 +29,7 @@ implementation:
         import torch
         import torch.nn as nn
         import os
+        import pickle
         from pathlib import Path
         from torchvision.models import resnet50, ResNet50_Weights
 
@@ -44,9 +45,9 @@ implementation:
             os.makedirs(os.path.dirname(args.model_init), exist_ok=True)
             os.makedirs(os.path.dirname(args.model_meta), exist_ok=True)
 
-            # Read categories from the provided JSON file
-            with open(args.categories_json, 'r') as f:
-                categories = json.load(f)
+            # Read categories from the provided pickle file (not JSON)
+            with open(args.categories_json, 'rb') as f:
+                categories = pickle.load(f)
             num_classes = len(categories)
             
             print(f"Number of classes: {num_classes}")
