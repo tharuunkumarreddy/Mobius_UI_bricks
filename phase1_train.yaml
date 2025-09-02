@@ -58,11 +58,28 @@ implementation:
 
         def list_images_under_category(category_dir: Path):
             files = []
+            if not category_dir.exists():
+                print(f"Category directory does not exist: {category_dir}")
+                return files
+            
+            print(f"Scanning category directory: {category_dir}")
+            
+            # First, check if images are directly in the category directory
+            for f in category_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in IMG_EXTS:
+                    files.append(f)
+                    print(f"  Found image: {f.name}")
+            
+            # Then check subdirectories (component directories)
             for comp_dir in category_dir.iterdir():
                 if comp_dir.is_dir():
+                    print(f"  Checking subdirectory: {comp_dir.name}")
                     for f in comp_dir.iterdir():
                         if f.is_file() and f.suffix.lower() in IMG_EXTS:
                             files.append(f)
+                            print(f"    Found image: {f.name}")
+            
+            print(f"Total images found in {category_dir.name}: {len(files)}")
             return files
 
         class UICategoryDataset(Dataset):
@@ -70,13 +87,29 @@ implementation:
                 self.transform = transform
                 self.samples = []
                 self.category_to_idx = category_to_idx
+                
+                print(f"Initializing dataset from: {split_root}")
+                print(f"Expected categories: {list(category_to_idx.keys())}")
+                
                 for cat in sorted(category_to_idx.keys()):
                     cat_dir = split_root / cat
+                    print(f"\nLooking for category: {cat}")
+                    print(f"Category directory: {cat_dir}")
+                    
                     if not cat_dir.exists(): 
+                        print(f"  Category directory does not exist, skipping: {cat}")
                         continue
+                        
                     for img_path in list_images_under_category(cat_dir):
                         self.samples.append((img_path, category_to_idx[cat]))
+                
+                print(f"\nTotal samples found: {len(self.samples)}")
                 if len(self.samples) == 0:
+                    print("ERROR: No images found!")
+                    print("Available directories in split_root:")
+                    for item in split_root.iterdir():
+                        if item.is_dir():
+                            print(f"  - {item.name}/")
                     raise RuntimeError(f"No images found under {split_root}.")
 
             def __len__(self): return len(self.samples)
@@ -200,6 +233,25 @@ implementation:
             for p in Path(args.val_dataset).iterdir():
                 print(f"  - {p}")
             exit(1)
+        
+        # Debug: Show actual directory structure
+        print("=== DEBUG: Train dataset structure ===")
+        def show_directory_structure(path, max_depth=3, current_depth=0):
+            if current_depth >= max_depth:
+                return
+            try:
+                for item in sorted(path.iterdir()):
+                    indent = "  " * current_depth
+                    if item.is_dir():
+                        print(f"{indent}{item.name}/")
+                        show_directory_structure(item, max_depth, current_depth + 1)
+                    else:
+                        print(f"{indent}{item.name}")
+            except PermissionError:
+                print(f"{indent}[Permission Denied]")
+        
+        show_directory_structure(train_path)
+        print("=== END DEBUG ===")
         
         train_ds = UICategoryDataset(train_path, category_to_idx, transform=train_tfms)
         val_ds   = UICategoryDataset(val_path, category_to_idx, transform=eval_tfms)
