@@ -93,7 +93,7 @@ implementation:
                 
                 for cat in sorted(category_to_idx.keys()):
                     cat_dir = split_root / cat
-                    print(f"\nLooking for category: {cat}")
+                    print(f"\\nLooking for category: {cat}")
                     print(f"Category directory: {cat_dir}")
                     
                     if not cat_dir.exists(): 
@@ -103,7 +103,7 @@ implementation:
                     for img_path in list_images_under_category(cat_dir):
                         self.samples.append((img_path, category_to_idx[cat]))
                 
-                print(f"\nTotal samples found: {len(self.samples)}")
+                print(f"Total samples found: {len(self.samples)}")
                 if len(self.samples) == 0:
                     print("ERROR: No images found!")
                     print("Available directories in split_root:")
@@ -286,7 +286,7 @@ implementation:
             try:
                 for p in Path(args.model_init).parent.iterdir():
                     print(f"  - {p}")
-            except:
+            except Exception:
                 pass
             exit(1)
 
