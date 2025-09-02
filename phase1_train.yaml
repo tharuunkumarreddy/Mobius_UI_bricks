@@ -1,60 +1,60 @@
-name: phase1_train
-description: Train the Phase 1 ResNet50 classifier using the provided dataset and model initialization.
-
+name: Phase1 Train ResNet50 Model
+description: Train the Phase 1 ResNet50 classifier for UI category classification
 inputs:
-  - { name: train_data, type: Dataset, description: "Training dataset" }
-  - { name: val_data, type: Dataset, description: "Validation dataset" }
-  - { name: test_data, type: Dataset, description: "Test dataset" }
-  - { name: model_init, type: Model, description: "Model initialization weights (phase1_model_init.pt)" }
-  - { name: model_meta, type: String, description: "Model metadata JSON (phase1_model_meta.json)" }
-
+  - {name: train_dataset, type: Dataset}       # Training dataset directory
+  - {name: val_dataset, type: Dataset}         # Validation dataset directory
+  - {name: test_dataset, type: Dataset}        # Test dataset directory
+  - {name: model_init, type: Model}            # phase1_model_init.pt file
+  - {name: model_meta, type: String}           # phase1_model_meta.json content
 outputs:
-  - { name: trained_model, type: Model, description: "Best trained model checkpoint (phase1_resnet50_best.pt)" }
-  - { name: label_maps, type: String, description: "Label mappings JSON (phase1_label_maps.json)" }
-  - { name: train_log, type: String, description: "Training log JSON (phase1_train_log.json)" }
-
+  - {name: trained_model, type: Model}         # phase1_resnet50_best.pt
+  - {name: label_maps, type: String}           # phase1_label_maps.json
+  - {name: train_log, type: String}            # phase1_train_log.json
 implementation:
   container:
-    image: python:3.9
+    image: pytorch/pytorch:2.0.1-cuda11.7-cudnn8-devel
     command:
       - sh
       - -c
       - |
-        # Install required dependencies
-        pip install torch torchvision pillow numpy scikit-learn --index-url https://download.pytorch.org/whl/cpu
-        
         exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
-        #!/usr/bin/env python3
-        import argparse
-        import json
-        import math
-        import random
-        import time
-        import os
-        import pickle
+        import argparse, json, math, random, time
         from pathlib import Path
         import numpy as np
-        import torch
-        import torch.nn as nn
-        import torch.backends.cudnn as cudnn
+        import torch, torch.nn as nn, torch.backends.cudnn as cudnn
         from torch.utils.data import Dataset, DataLoader
         from torchvision import transforms
-        from torchvision.models import resnet50, ResNet50_Weights
         from PIL import Image
-
+        import os
+        
+        # Install required packages
+        import subprocess
+        import sys
+        
+        def install_package(package):
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+        
+        try:
+            import torchvision
+        except ImportError:
+            install_package("torchvision")
+            import torchvision
+        
+        try:
+            from PIL import Image
+        except ImportError:
+            install_package("Pillow")
+            from PIL import Image
+        
         IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
         def set_seed(seed=42):
-            random.seed(seed)
-            np.random.seed(seed)
-            torch.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
-            cudnn.deterministic = False
-            cudnn.benchmark = True
+            random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed); cudnn.deterministic = False; cudnn.benchmark = True
 
         def list_images_under_category(category_dir: Path):
             files = []
@@ -70,27 +70,21 @@ implementation:
                 self.transform = transform
                 self.samples = []
                 self.category_to_idx = category_to_idx
-                
-                # Handle the case where split_root is the actual data directory
-                if split_root.is_dir():
-                    for cat in sorted(category_to_idx.keys()):
-                        cat_dir = split_root / cat
-                        if not cat_dir.exists(): 
-                            continue
-                        for img_path in list_images_under_category(cat_dir):
-                            self.samples.append((img_path, category_to_idx[cat]))
-                
+                for cat in sorted(category_to_idx.keys()):
+                    cat_dir = split_root / cat
+                    if not cat_dir.exists(): 
+                        continue
+                    for img_path in list_images_under_category(cat_dir):
+                        self.samples.append((img_path, category_to_idx[cat]))
                 if len(self.samples) == 0:
                     raise RuntimeError(f"No images found under {split_root}.")
 
-            def __len__(self):
-                return len(self.samples)
+            def __len__(self): return len(self.samples)
 
             def __getitem__(self, idx):
                 path, y = self.samples[idx]
                 img = Image.open(path).convert("RGB")
-                if self.transform:
-                    img = self.transform(img)
+                if self.transform: img = self.transform(img)
                 return img, y
 
         def accuracy(outputs, targets):
@@ -112,223 +106,220 @@ implementation:
                     n += bs
             return running_loss / n, running_acc / n
 
-        def main():
-            parser = argparse.ArgumentParser()
-            parser.add_argument('--train_data', type=str, required=True)
-            parser.add_argument('--val_data', type=str, required=True)
-            parser.add_argument('--test_data', type=str, required=True)
-            parser.add_argument('--model_init', type=str, required=True)
-            parser.add_argument('--model_meta', type=str, required=True)
-            parser.add_argument('--trained_model', type=str, required=True)
-            parser.add_argument('--label_maps', type=str, required=True)
-            parser.add_argument('--train_log', type=str, required=True)
-            parser.add_argument('--epochs', type=int, default=10)
-            parser.add_argument('--batch_size', type=int, default=32)
-            parser.add_argument('--lr', type=float, default=3e-4)
-            parser.add_argument('--weight_decay', type=float, default=1e-4)
-            parser.add_argument('--num_workers', type=int, default=2)
-            parser.add_argument('--seed', type=int, default=42)
-            args = parser.parse_args()
+        # Parse arguments
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--train_dataset', type=str, required=True)
+        parser.add_argument('--val_dataset', type=str, required=True)
+        parser.add_argument('--test_dataset', type=str, required=True)
+        parser.add_argument('--model_init', type=str, required=True)
+        parser.add_argument('--model_meta', type=str, required=True)
+        parser.add_argument('--trained_model', type=str, required=True)
+        parser.add_argument('--label_maps', type=str, required=True)
+        parser.add_argument('--train_log', type=str, required=True)
+        parser.add_argument('--epochs', type=int, default=10)
+        parser.add_argument('--batch_size', type=int, default=32)
+        parser.add_argument('--lr', type=float, default=3e-4)
+        parser.add_argument('--weight_decay', type=float, default=1e-4)
+        parser.add_argument('--num_workers', type=int, default=2)
+        parser.add_argument('--seed', type=int, default=42)
+        args = parser.parse_args()
 
-            set_seed(args.seed)
+        print(f"Train dataset: {args.train_dataset}")
+        print(f"Val dataset: {args.val_dataset}")
+        print(f"Test dataset: {args.test_dataset}")
+        print(f"Model init: {args.model_init}")
+        print(f"Model meta: {args.model_meta}")
+        print(f"Trained model output: {args.trained_model}")
+        print(f"Label maps output: {args.label_maps}")
+        print(f"Train log output: {args.train_log}")
 
-            # Ensure output directories exist
-            os.makedirs(os.path.dirname(args.trained_model), exist_ok=True)
-            os.makedirs(os.path.dirname(args.label_maps), exist_ok=True)
-            os.makedirs(os.path.dirname(args.train_log), exist_ok=True)
+        set_seed(args.seed)
 
-            # Load dataset paths from pickle files with better debugging
-            def load_dataset_info(dataset_pickle_path):
-                print(f"Attempting to load dataset from: {dataset_pickle_path}")
-                try:
-                    with open(dataset_pickle_path, 'rb') as f:
-                        dataset_info = pickle.load(f)
-                    print(f"Successfully loaded dataset info: {type(dataset_info)}")
-                    print(f"Dataset info keys: {dataset_info.keys() if isinstance(dataset_info, dict) else 'Not a dict'}")
-                    print(f"Dataset info content: {dataset_info}")
-                    return dataset_info
-                except Exception as e:
-                    print(f"Error loading dataset from {dataset_pickle_path}: {e}")
-                    raise
+        # Create output directories
+        for output_path in [args.trained_model, args.label_maps, args.train_log]:
+            output_dir = os.path.dirname(output_path)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
 
-            train_info = load_dataset_info(args.train_data)
-            val_info = load_dataset_info(args.val_data) 
-            test_info = load_dataset_info(args.test_data)
-
-            # Extract the actual data paths from the dataset info
-            if isinstance(train_info, dict) and 'data_path' in train_info:
-                train_path = Path(train_info['data_path'])
-                val_path = Path(val_info['data_path'])
-                test_path = Path(test_info['data_path'])
-            else:
-                print("Dataset info doesn't contain 'data_path' key, using direct paths")
-                train_path = Path(args.train_data).parent
-                val_path = Path(args.val_data).parent
-                test_path = Path(args.test_data).parent
-
-            print(f"Final paths - Train: {train_path}, Val: {val_path}, Test: {test_path}")
+        # Load metadata
+        try:
+            # model_meta is passed as inputValue (JSON string content)
+            meta = json.loads(args.model_meta)
+            print("Loaded metadata from JSON string")
+        except Exception as e:
+            print(f"Error loading model metadata: {e}")
+            exit(1)
             
-            # Check if paths exist and list contents
-            for name, path in [("Train", train_path), ("Val", val_path), ("Test", test_path)]:
-                print(f"{name} path exists: {path.exists()}")
-                if path.exists() and path.is_dir():
-                    print(f"{name} path contents: {list(path.iterdir())}")
-                    # Look for category subdirectories
-                    for item in path.iterdir():
-                        if item.is_dir():
-                            print(f"  {item.name}/: {list(item.iterdir())[:5]}...")  # Show first 5 items
+        image_size = meta["image_size"]
+        mean, std = meta["mean"], meta["std"]
+        categories = meta["categories"]
+        category_to_idx = {c:i for i,c in enumerate(categories)}
+        idx_to_category = {i:c for c,i in category_to_idx.items()}
 
-            # Load model metadata - handle both direct JSON and pickle file
+        train_tfms = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.15, hue=0.02),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ])
+        eval_tfms = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ])
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {device}")
+
+        # Build datasets/loaders - handle Kubeflow's /data subdirectory
+        train_path = Path(args.train_dataset)
+        val_path = Path(args.val_dataset)
+        
+        # Check if data is in subdirectory (common in Kubeflow)
+        if (train_path / "data").exists():
+            train_path = train_path / "data"
+        if (val_path / "data").exists():
+            val_path = val_path / "data"
+            
+        print(f"Using train path: {train_path}")
+        print(f"Using val path: {val_path}")
+        
+        # Check if paths exist and list contents for debugging
+        if not train_path.exists():
+            print(f"Train path does not exist: {train_path}")
+            print(f"Available paths in {args.train_dataset}:")
+            for p in Path(args.train_dataset).iterdir():
+                print(f"  - {p}")
+            exit(1)
+            
+        if not val_path.exists():
+            print(f"Val path does not exist: {val_path}")
+            print(f"Available paths in {args.val_dataset}:")
+            for p in Path(args.val_dataset).iterdir():
+                print(f"  - {p}")
+            exit(1)
+        
+        train_ds = UICategoryDataset(train_path, category_to_idx, transform=train_tfms)
+        val_ds   = UICategoryDataset(val_path, category_to_idx, transform=eval_tfms)
+        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                                  num_workers=args.num_workers, pin_memory=True)
+        val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                                  num_workers=args.num_workers, pin_memory=True)
+
+        # Load model - handle Kubeflow's /data subdirectory for model file
+        model_init_path = Path(args.model_init)
+        if (model_init_path / "data").exists() and (model_init_path / "data").is_file():
+            model_init_path = model_init_path / "data"
+        elif not model_init_path.is_file() and (model_init_path.parent / "data").exists():
+            # Check if the file is actually in a data subdirectory
+            potential_path = model_init_path.parent / "data" / model_init_path.name
+            if potential_path.exists():
+                model_init_path = potential_path
+        
+        print(f"Loading model from: {model_init_path}")
+        
+        try:
+            state = torch.load(model_init_path, map_location="cpu")
+            from torchvision.models import resnet50, ResNet50_Weights
+            m = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+            m.fc = nn.Sequential(nn.Dropout(p=0.2), nn.Linear(m.fc.in_features, len(categories)))
+            m.load_state_dict(state, strict=True)
+            m.to(device)
+            print("Model loaded successfully")
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            print(f"Available files in {args.model_init}:")
             try:
-                if args.model_meta.endswith('.json'):
-                    with open(args.model_meta, 'r') as f:
-                        meta = json.load(f)
-                else:
-                    with open(args.model_meta, 'rb') as f:
-                        meta = pickle.load(f)
-            except Exception as e:
-                print(f"Error loading model meta: {e}")
-                exit(1)
+                for p in Path(args.model_init).parent.iterdir():
+                    print(f"  - {p}")
+            except:
+                pass
+            exit(1)
 
-            image_size = meta["image_size"]
-            mean, std = meta["mean"], meta["std"]
-            categories = meta["categories"]
-            category_to_idx = {c:i for i,c in enumerate(categories)}
-            idx_to_category = {i:c for c,i in category_to_idx.items()}
+        # Loss/optim/sched
+        criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
+        optimizer = torch.optim.AdamW(m.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-            print(f"Dataset root: {dataset_root_path}")
-            print(f"Categories: {categories}")
-            print(f"Number of classes: {len(categories)}")
+        total_steps = args.epochs * (len(train_loader) if len(train_loader) > 0 else 1)
+        warmup_steps = max(100, int(0.05 * total_steps))
+        def lr_lambda(step):
+            if step < warmup_steps:
+                return float(step) / float(max(1, warmup_steps))
+            progress = (step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        scaler = torch.cuda.amp.GradScaler()
 
-            train_tfms = transforms.Compose([
-                transforms.Resize((image_size, image_size)),
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)),
-                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.15, hue=0.02),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=mean, std=std),
-            ])
-            eval_tfms = transforms.Compose([
-                transforms.Resize((image_size, image_size)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=mean, std=std),
-            ])
+        # Train
+        print("Starting training...")
+        best_val_acc = 0.0
+        for epoch in range(1, args.epochs + 1):
+            m.train(); epoch_loss = 0.0; epoch_acc = 0.0; seen = 0
+            t0 = time.time()
+            for x, y in train_loader:
+                x, y = x.to(device), y.to(device)
+                optimizer.zero_grad(set_to_none=True)
+                with torch.cuda.amp.autocast():
+                    logits = m(x)
+                    loss = criterion(logits, y)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                bs = y.size(0)
+                epoch_loss += loss.item() * bs
+                epoch_acc  += ((logits.argmax(1) == y).float().mean().item()) * bs
+                seen += bs
+            train_loss = epoch_loss / max(1, seen)
+            train_acc  = epoch_acc  / max(1, seen)
+            val_loss, val_acc = evaluate(m, val_loader, device, criterion)
+            dt = time.time() - t0
+            print(f"Epoch {epoch:02d}/{args.epochs} | {dt:.1f}s | train loss {train_loss:.4f} acc {train_acc:.3f} | val loss {val_loss:.4f} acc {val_acc:.3f}")
 
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            print(f"Using device: {device}")
-
-            # Build datasets/loaders
-            train_ds = UICategoryDataset(dataset_root_path / "train", category_to_idx, transform=train_tfms)
-            val_ds = UICategoryDataset(dataset_root_path / "val", category_to_idx, transform=eval_tfms)
-            train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                                      num_workers=args.num_workers, pin_memory=True)
-            val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                                    num_workers=args.num_workers, pin_memory=True)
-
-            print(f"Train samples: {len(train_ds)}, Val samples: {len(val_ds)}")
-
-            # Load model
-            state = torch.load(args.model_init, map_location="cpu")
-            # Rebuild the same architecture used in model_def
-            model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
-            model.fc = nn.Sequential(
-                nn.Dropout(p=0.2), 
-                nn.Linear(model.fc.in_features, len(categories))
-            )
-            model.load_state_dict(state, strict=True)
-            model.to(device)
-
-            # Loss/optim/sched
-            criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
-            optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-
-            total_steps = args.epochs * (len(train_loader) if len(train_loader) > 0 else 1)
-            warmup_steps = max(100, int(0.05 * total_steps))
-            
-            def lr_lambda(step):
-                if step < warmup_steps:
-                    return float(step) / float(max(1, warmup_steps))
-                progress = (step - warmup_steps) / float(max(1, total_steps - warmup_steps))
-                return 0.5 * (1.0 + math.cos(math.pi * progress))
-            
-            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-            scaler = torch.cuda.amp.GradScaler()
-
-            # Training loop
-            best_val_acc = 0.0
-            print("Starting training...")
-            
-            for epoch in range(1, args.epochs + 1):
-                model.train()
-                epoch_loss = 0.0
-                epoch_acc = 0.0
-                seen = 0
-                t0 = time.time()
-                
-                for x, y in train_loader:
-                    x, y = x.to(device), y.to(device)
-                    optimizer.zero_grad(set_to_none=True)
-                    with torch.cuda.amp.autocast():
-                        logits = model(x)
-                        loss = criterion(logits, y)
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
-                    scheduler.step()
-                    bs = y.size(0)
-                    epoch_loss += loss.item() * bs
-                    epoch_acc  += accuracy(logits, y) * bs
-                    seen += bs
-                    
-                train_loss = epoch_loss / max(1, seen)
-                train_acc  = epoch_acc  / max(1, seen)
-                val_loss, val_acc = evaluate(model, val_loader, device, criterion)
-                dt = time.time() - t0
-                
-                print(f"Epoch {epoch:02d}/{args.epochs} | {dt:.1f}s | train loss {train_loss:.4f} acc {train_acc:.3f} | val loss {val_loss:.4f} acc {val_acc:.3f}")
-
-                if val_acc > best_val_acc:
-                    best_val_acc = val_acc
-                    torch.save({
-                        "model_state": model.state_dict(),
-                        "category_to_idx": category_to_idx,
-                        "idx_to_category": idx_to_category,
-                        "image_size": image_size,
-                    }, args.trained_model)
-                    print(f"✓ Saved new best model (val_acc={val_acc:.3f})")
-
-            # Save label maps
-            with open(args.label_maps, 'w') as f:
-                json.dump({
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                torch.save({
+                    "model_state": m.state_dict(),
                     "category_to_idx": category_to_idx,
-                    "idx_to_category": idx_to_category
-                }, f, indent=2)
+                    "idx_to_category": idx_to_category,
+                    "image_size": image_size,
+                }, args.trained_model)
+                print(f"✓ Saved new best to {args.trained_model} (val_acc={val_acc:.3f})")
 
-            # Save training log
+        # Save sidecar outputs
+        try:
+            label_maps_data = {
+                "category_to_idx": category_to_idx, 
+                "idx_to_category": idx_to_category
+            }
+            with open(args.label_maps, 'w') as f:
+                json.dump(label_maps_data, f, indent=2)
+            
+            train_log_data = {
+                "best_val_acc": best_val_acc
+            }
             with open(args.train_log, 'w') as f:
-                json.dump({
-                    "best_val_acc": best_val_acc
-                }, f, indent=2)
-
-            print(f"Training completed. Best val acc: {best_val_acc:.3f}")
-            print(f"Trained model saved to: {args.trained_model}")
-            print(f"Label maps saved to: {args.label_maps}")
-            print(f"Training log saved to: {args.train_log}")
-
-        if __name__ == "__main__":
-            main()
-
+                json.dump(train_log_data, f, indent=2)
+            
+            print(f"Saved label maps to {args.label_maps}")
+            print(f"Saved training log to {args.train_log}")
+            print(f"Best validation accuracy: {best_val_acc:.3f}")
+        except Exception as e:
+            print(f"Error saving outputs: {e}")
+            exit(1)
     args:
-      - --train_data
-      - {inputPath: train_data}
-      - --val_data
-      - {inputPath: val_data}
-      - --test_data
-      - {inputPath: test_data}
+      - --train_dataset
+      - {inputPath: train_dataset}
+      - --val_dataset
+      - {inputPath: val_dataset}
+      - --test_dataset
+      - {inputPath: test_dataset}
       - --model_init
       - {inputPath: model_init}
       - --model_meta
-      - {inputPath: model_meta}
+      - {inputValue: model_meta}
       - --trained_model
       - {outputPath: trained_model}
       - --label_maps
