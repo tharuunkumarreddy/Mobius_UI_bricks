@@ -1,0 +1,92 @@
+name: phase1_model_def
+description: Create a ResNet50 (ImageNet1K_V2 weights) with the final head sized to num_classes and save model initialization and metadata.
+
+inputs:
+  - { name: categories_json, type: Dataset, description: "Path to categories.json file containing class categories" }
+
+outputs:
+  - { name: model_init, type: Model, description: "Model initialization weights (torch saved state_dict)" }
+  - { name: model_meta, type: String, description: "Model metadata as JSON including image_size, mean, std, num_classes, categories" }
+
+implementation:
+  container:
+    image: python:3.9
+    command:
+      - sh
+      - -c
+      - |
+        # Install required dependencies
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        #!/usr/bin/env python3
+        import argparse
+        import json
+        import torch
+        import torch.nn as nn
+        import os
+        from pathlib import Path
+        from torchvision.models import resnet50, ResNet50_Weights
+
+        def main():
+            parser = argparse.ArgumentParser()
+            parser.add_argument('--categories_json', type=str, required=True)
+            parser.add_argument('--model_init', type=str, required=True)
+            parser.add_argument('--model_meta', type=str, required=True)
+            parser.add_argument('--image_size', type=int, default=224)
+            args = parser.parse_args()
+
+            # Ensure output directories exist
+            os.makedirs(os.path.dirname(args.model_init), exist_ok=True)
+            os.makedirs(os.path.dirname(args.model_meta), exist_ok=True)
+
+            # Read categories from the provided JSON file
+            with open(args.categories_json, 'r') as f:
+                categories = json.load(f)
+            num_classes = len(categories)
+            
+            print(f"Number of classes: {num_classes}")
+            print(f"Categories: {categories}")
+
+            # Initialize the ResNet50 model with pretrained weights
+            weights = ResNet50_Weights.IMAGENET1K_V2
+            model = resnet50(weights=weights)
+            model.fc = nn.Sequential(
+                nn.Dropout(p=0.2),
+                nn.Linear(model.fc.in_features, num_classes)
+            )
+
+            # Save model state dictionary
+            torch.save(model.state_dict(), args.model_init)
+
+            # Save meta data including categories and model config
+            meta = {
+                "image_size": args.image_size,
+                "mean": weights.transforms().mean.tolist(),
+                "std": weights.transforms().std.tolist(),
+                "num_classes": num_classes,
+                "categories": categories
+            }
+            
+            with open(args.model_meta, 'w') as f:
+                json.dump(meta, f, indent=2)
+
+            # Confirmation
+            print(f"Saved model initialization to: {args.model_init}")
+            print(f"Saved model metadata to: {args.model_meta}")
+            print(f"Model metadata: {meta}")
+
+        if __name__ == "__main__":
+            main()
+
+    args:
+      - --categories_json
+      - {inputPath: categories_json}
+      - --model_init
+      - {outputPath: model_init}
+      - --model_meta
+      - {outputPath: model_meta}
