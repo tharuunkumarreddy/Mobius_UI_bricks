@@ -179,13 +179,48 @@ implementation:
         print(f"Using device: {device}")
 
         # Build datasets and loaders
+        def resolve_dataset_path(dataset_path_str):
+            """Resolve dataset path - handle both files and directories"""
+            dataset_path = Path(dataset_path_str)
+            print(f"Resolving dataset path: {dataset_path}")
+            
+            if dataset_path.is_file():
+                # If it's a file, check if it's in a directory we should use
+                parent_dir = dataset_path.parent
+                print(f"Input is a file, using parent directory: {parent_dir}")
+                return parent_dir
+            elif dataset_path.is_dir():
+                return dataset_path
+            else:
+                print(f"Path does not exist: {dataset_path}")
+                # Try some common patterns
+                possible_paths = [
+                    dataset_path,
+                    dataset_path.parent,
+                    dataset_path / "data",
+                ]
+                for p in possible_paths:
+                    if p.exists() and p.is_dir():
+                        print(f"Found valid path: {p}")
+                        return p
+                raise FileNotFoundError(f"Could not find valid dataset path from: {dataset_path}")
+        
         try:
-            train_ds = UICategoryDataset(Path(args.train_dataset), category_to_idx, transform=train_tfms)
-            val_ds = UICategoryDataset(Path(args.val_dataset), category_to_idx, transform=eval_tfms)
+            train_path = resolve_dataset_path(args.train_dataset)
+            val_path = resolve_dataset_path(args.val_dataset)
+            
+            print(f"Using train dataset path: {train_path}")
+            print(f"Using val dataset path: {val_path}")
+            
+            train_ds = UICategoryDataset(train_path, category_to_idx, transform=train_tfms)
+            val_ds = UICategoryDataset(val_path, category_to_idx, transform=eval_tfms)
             print(f"Train dataset size: {len(train_ds)}")
             print(f"Val dataset size: {len(val_ds)}")
         except Exception as e:
             print(f"Error creating datasets: {e}")
+            print(f"Full error details:", str(e))
+            import traceback
+            traceback.print_exc()
             exit(1)
             
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
