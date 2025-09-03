@@ -37,10 +37,13 @@ implementation:
         from torchvision import transforms
         from torchvision.models import resnet50, ResNet50_Weights
         from PIL import Image
-        
-        # Install required packages
         import subprocess
         import sys
+        import tarfile
+        import zipfile
+        import shutil
+        
+        # Install required packages
         subprocess.check_call([sys.executable, "-m", "pip", "install", "torchvision", "Pillow"])
         
         IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -53,28 +56,91 @@ implementation:
             cudnn.deterministic = False
             cudnn.benchmark = True
 
-        def list_images_under_category(category_dir: Path):
+        def find_images_recursively(root_dir):
             files = []
-            for comp_dir in category_dir.iterdir():
-                if comp_dir.is_dir():
-                    for f in comp_dir.iterdir():
-                        if f.is_file() and f.suffix.lower() in IMG_EXTS:
-                            files.append(f)
+            if root_dir.is_file():
+                if root_dir.suffix.lower() in IMG_EXTS:
+                    files.append(root_dir)
+                return files
+            
+            for item in root_dir.rglob('*'):
+                if item.is_file() and item.suffix.lower() in IMG_EXTS:
+                    files.append(item)
+            return files
+
+        def list_images_under_category(category_dir):
+            files = []
+            if not category_dir.exists():
+                return files
+            
+            has_subdirs = any(item.is_dir() for item in category_dir.iterdir())
+            
+            if has_subdirs:
+                for comp_dir in category_dir.iterdir():
+                    if comp_dir.is_dir():
+                        for f in comp_dir.iterdir():
+                            if f.is_file() and f.suffix.lower() in IMG_EXTS:
+                                files.append(f)
+            else:
+                for f in category_dir.iterdir():
+                    if f.is_file() and f.suffix.lower() in IMG_EXTS:
+                        files.append(f)
+            
             return files
 
         class UICategoryDataset(Dataset):
-            def __init__(self, split_root: Path, category_to_idx: dict, transform=None):
+            def __init__(self, split_root, category_to_idx, transform=None):
                 self.transform = transform
                 self.samples = []
                 self.category_to_idx = category_to_idx
+                split_root = Path(split_root)
+                
+                print(f"Looking for dataset at: {split_root}")
+                print(f"Dataset path exists: {split_root.exists()}")
+                
+                if split_root.is_file():
+                    print(f"Input is a file, not a directory: {split_root}")
+                    raise RuntimeError(f"Expected directory but got file: {split_root}")
+                
+                if not split_root.exists():
+                    print(f"Dataset path does not exist: {split_root}")
+                    raise RuntimeError(f"Dataset path does not exist: {split_root}")
+                
+                contents = list(split_root.iterdir()) if split_root.exists() else []
+                print(f"Contents of {split_root}: {[str(c.name) for c in contents]}")
+                
+                category_dirs = [d for d in contents if d.is_dir() and d.name in category_to_idx]
+                print(f"Found category directories: {[d.name for d in category_dirs]}")
+                
+                if len(category_dirs) == 0:
+                    if len(contents) == 1 and contents[0].is_dir():
+                        data_dir = contents[0]
+                        print(f"Checking single subdirectory: {data_dir}")
+                        sub_contents = list(data_dir.iterdir()) if data_dir.exists() else []
+                        sub_category_dirs = [d for d in sub_contents if d.is_dir() and d.name in category_to_idx]
+                        
+                        if len(sub_category_dirs) > 0:
+                            print(f"Found category directories in subdirectory: {[d.name for d in sub_category_dirs]}")
+                            split_root = data_dir
+                
                 for cat in sorted(category_to_idx.keys()):
                     cat_dir = split_root / cat
                     if not cat_dir.exists(): 
+                        print(f"Category directory not found: {cat_dir}")
                         continue
-                    for img_path in list_images_under_category(cat_dir):
+                    
+                    img_paths = list_images_under_category(cat_dir)
+                    print(f"Found {len(img_paths)} images in category '{cat}'")
+                    
+                    for img_path in img_paths:
                         self.samples.append((img_path, category_to_idx[cat]))
+                
                 if len(self.samples) == 0:
-                    raise RuntimeError(f"No images found under {split_root}.")
+                    all_images = find_images_recursively(split_root)
+                    print(f"Total images found recursively in {split_root}: {len(all_images)}")
+                    if len(all_images) > 0:
+                        print(f"Sample image paths: {[str(p) for p in all_images[:5]]}")
+                    raise RuntimeError(f"No images found under {split_root}. Expected categories: {list(category_to_idx.keys())}")
 
             def __len__(self): 
                 return len(self.samples)
@@ -105,6 +171,85 @@ implementation:
                     n += bs
             return running_loss / n, running_acc / n
 
+        def extract_archive(file_path, extract_to):
+            file_path = Path(file_path)
+            extract_to = Path(extract_to)
+            
+            print(f"Extracting {file_path} to {extract_to}")
+            extract_to.mkdir(parents=True, exist_ok=True)
+            
+            try:
+                if tarfile.is_tarfile(str(file_path)):
+                    print("Detected tar archive")
+                    with tarfile.open(str(file_path), 'r:*') as tar:
+                        tar.extractall(path=str(extract_to))
+                        print("Tar extraction successful")
+                        return True
+                        
+                elif zipfile.is_zipfile(str(file_path)):
+                    print("Detected zip archive")
+                    with zipfile.ZipFile(str(file_path), 'r') as zip_ref:
+                        zip_ref.extractall(str(extract_to))
+                        print("Zip extraction successful")
+                        return True
+                        
+                else:
+                    print(f"File is not a recognized archive format")
+                    try:
+                        with open(file_path, 'r') as f:
+                            content = f.read(500)
+                            print(f"File content preview: {content}")
+                    except:
+                        try:
+                            with open(file_path, 'rb') as f:
+                                content = f.read(100)
+                                print(f"File binary content preview: {content}")
+                        except:
+                            print("Cannot read file content")
+                    return False
+                    
+            except Exception as e:
+                print(f"Error during extraction: {e}")
+                return False
+
+        def process_dataset_input(input_path_str, dataset_name):
+            input_path = Path(input_path_str)
+            print(f"\n=== PROCESSING {dataset_name.upper()} DATASET ===")
+            print(f"Input path: {input_path}")
+            print(f"Path exists: {input_path.exists()}")
+            print(f"Path is file: {input_path.is_file()}")
+            print(f"Path is dir: {input_path.is_dir()}")
+            
+            if input_path.is_file():
+                file_size = input_path.stat().st_size
+                print(f"File size: {file_size} bytes ({file_size/1024/1024:.1f} MB)")
+                print(f"File suffix: {input_path.suffix}")
+                
+                extract_dir = input_path.parent / f"{dataset_name}_extracted"
+                
+                if extract_archive(input_path, extract_dir):
+                    extracted_contents = list(extract_dir.iterdir()) if extract_dir.exists() else []
+                    print(f"Extracted contents: {[c.name for c in extracted_contents]}")
+                    
+                    if len(extracted_contents) == 1 and extracted_contents[0].is_dir():
+                        final_path = extracted_contents[0]
+                        print(f"Using extracted subdirectory: {final_path}")
+                    else:
+                        final_path = extract_dir
+                        print(f"Using extraction directory: {final_path}")
+                    
+                    return final_path
+                else:
+                    print("Failed to extract archive, treating as regular file")
+                    return input_path.parent
+                    
+            elif input_path.is_dir():
+                print(f"Input is directory: {input_path}")
+                return input_path
+            else:
+                print(f"Input path does not exist: {input_path}")
+                return None
+
         # Parse arguments
         parser = argparse.ArgumentParser()
         parser.add_argument('--train_dataset', type=str, required=True)
@@ -117,16 +262,15 @@ implementation:
         parser.add_argument('--train_log', type=str, required=True)
         args = parser.parse_args()
 
-        print(f"Train dataset path: {args.train_dataset}")
-        print(f"Val dataset path: {args.val_dataset}")
-        print(f"Test dataset path: {args.test_dataset}")
-        print(f"Model init path: {args.model_init}")
+        print(f"Train dataset: {args.train_dataset}")
+        print(f"Val dataset: {args.val_dataset}")
+        print(f"Test dataset: {args.test_dataset}")
+        print(f"Model init: {args.model_init}")
         print(f"Model meta: {args.model_meta}")
         print(f"Trained model output: {args.trained_model}")
         print(f"Label maps output: {args.label_maps}")
         print(f"Train log output: {args.train_log}")
 
-        # Training parameters
         epochs = 10
         batch_size = 32
         lr = 3e-4
@@ -136,17 +280,16 @@ implementation:
         
         set_seed(seed)
         
-        # Create output directories
         for output_path in [args.trained_model, args.label_maps, args.train_log]:
             output_dir = os.path.dirname(output_path)
             if output_dir and not os.path.exists(output_dir):
                 os.makedirs(output_dir, exist_ok=True)
                 print(f"Created directory: {output_dir}")
 
-        # Load model metadata
         try:
             meta = json.loads(args.model_meta)
             print(f"Successfully loaded model metadata")
+            print(f"Loaded metadata from JSON string")
         except Exception as e:
             print(f"Error loading model metadata: {e}")
             exit(1)
@@ -159,8 +302,8 @@ implementation:
 
         print(f"Image size: {image_size}")
         print(f"Number of categories: {len(categories)}")
+        print(f"Categories: {categories}")
 
-        # Data transforms
         train_tfms = transforms.Compose([
             transforms.Resize((image_size, image_size)),
             transforms.RandomHorizontalFlip(p=0.5),
@@ -178,39 +321,22 @@ implementation:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {device}")
 
-        # Build datasets and loaders
-        def resolve_dataset_path(dataset_path_str):
-            """Resolve dataset path - handle both files and directories"""
-            dataset_path = Path(dataset_path_str)
-            print(f"Resolving dataset path: {dataset_path}")
-            
-            if dataset_path.is_file():
-                # If it's a file, check if it's in a directory we should use
-                parent_dir = dataset_path.parent
-                print(f"Input is a file, using parent directory: {parent_dir}")
-                return parent_dir
-            elif dataset_path.is_dir():
-                return dataset_path
-            else:
-                print(f"Path does not exist: {dataset_path}")
-                # Try some common patterns
-                possible_paths = [
-                    dataset_path,
-                    dataset_path.parent,
-                    dataset_path / "data",
-                ]
-                for p in possible_paths:
-                    if p.exists() and p.is_dir():
-                        print(f"Found valid path: {p}")
-                        return p
-                raise FileNotFoundError(f"Could not find valid dataset path from: {dataset_path}")
-        
         try:
-            train_path = resolve_dataset_path(args.train_dataset)
-            val_path = resolve_dataset_path(args.val_dataset)
+            print("\n=== PROCESSING DATASETS ===")
             
-            print(f"Using train dataset path: {train_path}")
-            print(f"Using val dataset path: {val_path}")
+            train_path = process_dataset_input(args.train_dataset, "train")
+            val_path = process_dataset_input(args.val_dataset, "val")
+            
+            print(f"\n=== FINAL PATHS ===")
+            print(f"Train path: {train_path}")
+            print(f"Val path: {val_path}")
+            print(f"Train exists and is dir: {train_path and train_path.exists() and train_path.is_dir()}")
+            print(f"Val exists and is dir: {val_path and val_path.exists() and val_path.is_dir()}")
+            
+            if not train_path or not train_path.exists() or not train_path.is_dir():
+                raise RuntimeError(f"Invalid train dataset path: {train_path}")
+            if not val_path or not val_path.exists() or not val_path.is_dir():
+                raise RuntimeError(f"Invalid val dataset path: {val_path}")
             
             train_ds = UICategoryDataset(train_path, category_to_idx, transform=train_tfms)
             val_ds = UICategoryDataset(val_path, category_to_idx, transform=eval_tfms)
@@ -228,7 +354,6 @@ implementation:
         val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
                                num_workers=num_workers, pin_memory=True)
 
-        # Load and setup model
         try:
             print(f"\n=== LOADING MODEL ===")
             model_init_path = Path(args.model_init)
@@ -242,7 +367,6 @@ implementation:
             else:
                 raise FileNotFoundError(f"Model init file not found: {model_init_path}")
                 
-            # Rebuild the same architecture used in model definition
             m = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
             m.fc = nn.Sequential(nn.Dropout(p=0.2), nn.Linear(m.fc.in_features, len(categories)))
             m.load_state_dict(state, strict=True)
@@ -254,7 +378,6 @@ implementation:
             traceback.print_exc()
             exit(1)
 
-        # Loss, optimizer, scheduler
         criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
         optimizer = torch.optim.AdamW(m.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -270,7 +393,6 @@ implementation:
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
         scaler = torch.cuda.amp.GradScaler()
 
-        # Training loop
         print("Starting training...")
         best_val_acc = 0.0
         
@@ -320,9 +442,7 @@ implementation:
                     print(f"Error saving trained model: {e}")
                     exit(1)
 
-        # Save output files
         try:
-            # Save label maps
             label_maps_data = {
                 "category_to_idx": category_to_idx,
                 "idx_to_category": idx_to_category
@@ -331,7 +451,6 @@ implementation:
                 json.dump(label_maps_data, f, indent=2)
             print(f"Saved label maps to {args.label_maps}")
             
-            # Save training log
             train_log_data = {
                 "best_val_acc": best_val_acc
             }
