@@ -101,10 +101,12 @@ implementation:
 
         def main():
             ap = argparse.ArgumentParser()
-            ap.add_argument("--dataset_root", type=Path, required=True, help="Root for train, val, test datasets")
-            ap.add_argument("--model_init", type=Path, required=True, help="Path to model initialization weights")
-            ap.add_argument("--model_meta", type=Path, required=True, help="Path to model metadata")
-            ap.add_argument("--out_dir", type=Path, required=True, help="Output directory for model and logs")
+            ap.add_argument("--train_data", type=Path, required=True, help="Path to the training dataset")
+            ap.add_argument("--val_data", type=Path, required=True, help="Path to the validation dataset")
+            ap.add_argument("--test_data", type=Path, required=True, help="Path to the test dataset")
+            ap.add_argument("--phase1_model_init", type=Path, required=True, help="Path to the model initialization weights (phase1_model_init.pt)")
+            ap.add_argument("--phase1_model_meta", type=Path, required=True, help="Path to the model metadata (phase1_model_meta.json)")
+            ap.add_argument("--out_dir", type=Path, required=True, help="Output directory for the model and logs")
             ap.add_argument("--epochs", type=int, default=10)
             ap.add_argument("--batch_size", type=int, default=32)
             ap.add_argument("--lr", type=float, default=3e-4)
@@ -116,7 +118,7 @@ implementation:
             set_seed(args.seed)
             args.out_dir.mkdir(parents=True, exist_ok=True)
 
-            meta = json.loads(Path(args.model_meta).read_text())
+            meta = json.loads(Path(args.phase1_model_meta).read_text())
             categories = meta["categories"]
             category_to_idx = {c:i for i,c in enumerate(categories)}
             idx_to_category = {i:c for c,i in category_to_idx.items()}
@@ -139,13 +141,13 @@ implementation:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
             # Load datasets and dataloaders
-            train_ds = UICategoryDataset(args.dataset_root / "train", category_to_idx, transform=train_tfms)
-            val_ds   = UICategoryDataset(args.dataset_root / "val", category_to_idx, transform=eval_tfms)
+            train_ds = UICategoryDataset(args.train_data, category_to_idx, transform=train_tfms)
+            val_ds   = UICategoryDataset(args.val_data, category_to_idx, transform=eval_tfms)
             train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
             val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
 
             # Load model
-            state = torch.load(args.model_init, map_location=device)
+            state = torch.load(args.phase1_model_init, map_location=device)
             from torchvision.models import resnet50
             model = resnet50(pretrained=False)
             model.fc = nn.Sequential(nn.Dropout(p=0.2), nn.Linear(model.fc.in_features, len(categories)))
@@ -199,14 +201,12 @@ implementation:
         if __name__ == "__main__":
             main()
         PY
-
-        python /tmp/phase1_train.py
     args:
-      - {inputPath: train_data}
-      - {inputPath: val_data}
-      - {inputPath: test_data}
-      - {inputPath: phase1_model_init}
-      - {inputPath: phase1_model_meta}
-      - {outputPath: phase1_resnet50_best}
-      - {outputPath: phase1_label_maps}
-      - {outputPath: phase1_train_log}
+      - {inputPath: train_data}   # Path to the train data directory
+      - {inputPath: val_data}     # Path to the val data directory
+      - {inputPath: test_data}    # Path to the test data directory
+      - {inputPath: phase1_model_init}  # Path to the model init file
+      - {inputPath: phase1_model_meta}  # Path to the model meta file
+      - {outputPath: phase1_resnet50_best}  # Output path for the best model
+      - {outputPath: phase1_label_maps}  # Output path for label maps
+      - {outputPath: phase1_train_log}  # Output path for training logs
