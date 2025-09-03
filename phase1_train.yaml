@@ -1,18 +1,18 @@
-name: Phase1 Train ResNet50 Model
-description: Train the Phase 1 ResNet50 classifier for UI category classification
+name: Phase1 Train Model
+description: Trains the Phase 1 ResNet50 classifier for UI component classification using provided datasets and model initialization.
 inputs:
-  - {name: train_dataset, type: Dataset}       # Training dataset directory
-  - {name: val_dataset, type: Dataset}         # Validation dataset directory
-  - {name: test_dataset, type: Dataset}        # Test dataset directory
-  - {name: model_init, type: Model}            # phase1_model_init.pt file
-  - {name: model_meta, type: String}           # phase1_model_meta.json content
+  - {name: train_dataset, type: Dataset}      # Training dataset directory
+  - {name: val_dataset, type: Dataset}        # Validation dataset directory  
+  - {name: test_dataset, type: Dataset}       # Test dataset directory
+  - {name: model_init, type: Model}           # phase1_model_init.pt file
+  - {name: model_meta, type: String}          # phase1_model_meta.json content as string
 outputs:
-  - {name: trained_model, type: Model}         # phase1_resnet50_best.pt
-  - {name: label_maps, type: String}           # phase1_label_maps.json
-  - {name: train_log, type: String}            # phase1_train_log.json
+  - {name: trained_model, type: Model}        # phase1_resnet50_best.pt - trained model checkpoint
+  - {name: label_maps, type: String}          # phase1_label_maps.json - category mappings
+  - {name: train_log, type: String}           # phase1_train_log.json - training metrics
 implementation:
   container:
-    image: pytorch/pytorch:2.0.1-cuda11.7-cudnn8-devel
+    image: pytorch/pytorch:2.0.1-cuda11.7-cudnn8-runtime
     command:
       - sh
       - -c
@@ -22,170 +22,67 @@ implementation:
       - -u
       - -c
       - |
-        import argparse, json, math, random, time
+        import argparse
+        import json
+        import math
+        import random
+        import time
+        import os
         from pathlib import Path
         import numpy as np
-        import torch, torch.nn as nn, torch.backends.cudnn as cudnn
+        import torch
+        import torch.nn as nn
+        import torch.backends.cudnn as cudnn
         from torch.utils.data import Dataset, DataLoader
         from torchvision import transforms
+        from torchvision.models import resnet50, ResNet50_Weights
         from PIL import Image
-        import os
+        
+        # Install required packages
         import subprocess
         import sys
-        import zipfile
-        import tarfile
-        import shutil
-        
-        def install_package(package):
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-        
-        try:
-            import torchvision
-        except ImportError:
-            install_package("torchvision")
-            import torchvision
-        
-        try:
-            from PIL import Image
-        except ImportError:
-            install_package("Pillow")
-            from PIL import Image
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "torchvision", "Pillow"])
         
         IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
         def set_seed(seed=42):
-            random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed); cudnn.deterministic = False; cudnn.benchmark = True
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            cudnn.deterministic = False
+            cudnn.benchmark = True
 
-        def extract_dataset_file(data_file_path, extract_base_dir):
-            # Extract a dataset file to a directory
-            data_file = Path(data_file_path)
-            extract_dir = Path(extract_base_dir)
-            
-            print(f"Input file: {data_file}")
-            print(f"Extract to: {extract_dir}")
-            print(f"File exists: {data_file.exists()}")
-            print(f"File is file: {data_file.is_file()}")
-            
-            if not data_file.is_file():
-                print(f"Not a file, returning as-is: {data_file}")
-                return data_file
-            
-            # Show file info
-            file_size = data_file.stat().st_size
-            print(f"File size: {file_size} bytes ({file_size/1024/1024:.1f} MB)")
-            print(f"File suffix: {data_file.suffix}")
-            
-            # Create extract directory
-            try:
-                extract_dir.mkdir(parents=True, exist_ok=True)
-                print(f"Created extraction directory: {extract_dir}")
-            except Exception as e:
-                print(f"Failed to create extraction directory: {e}")
-                return data_file
-            
-            # Try to extract based on file type
-            try:
-                if data_file.suffix.lower() == '.zip':
-                    print("Extracting ZIP file...")
-                    with zipfile.ZipFile(data_file, 'r') as zf:
-                        zf.extractall(extract_dir)
-                elif data_file.suffix.lower() in ['.tar', '.tar.gz', '.tgz']:
-                    print("Extracting TAR file...")
-                    with tarfile.open(data_file, 'r:*') as tf:
-                        tf.extractall(extract_dir)
-                else:
-                    print(f"Unsupported file type: {data_file.suffix}")
-                    print("Checking file header...")
-                    with open(data_file, 'rb') as f:
-                        header = f.read(50)
-                        print(f"First 50 bytes (hex): {header.hex()}")
-                        print(f"First 50 bytes (ascii): {header.decode('ascii', errors='ignore')}")
-                    return data_file
-                
-                # Check what was extracted
-                extracted_items = list(extract_dir.iterdir())
-                print(f"Extraction successful! Found {len(extracted_items)} items:")
-                for item in extracted_items:
-                    item_type = "DIR" if item.is_dir() else "FILE"
-                    print(f"  {item_type}: {item.name}")
-                
-                # If only one directory was extracted, use that
-                if len(extracted_items) == 1 and extracted_items[0].is_dir():
-                    result_dir = extracted_items[0]
-                    print(f"Using single extracted directory: {result_dir}")
-                    return result_dir
-                else:
-                    print(f"Using extraction base directory: {extract_dir}")
-                    return extract_dir
-                    
-            except Exception as e:
-                print(f"Extraction failed: {e}")
-                return data_file
-
-        def list_images_under_category(category_dir):
+        def list_images_under_category(category_dir: Path):
             files = []
-            if not category_dir.exists():
-                print(f"Category directory does not exist: {category_dir}")
-                return files
-            
-            print(f"Scanning category directory: {category_dir}")
-            
-            # First, check if images are directly in the category directory
-            for f in category_dir.iterdir():
-                if f.is_file() and f.suffix.lower() in IMG_EXTS:
-                    files.append(f)
-                    print(f"  Found image: {f.name}")
-            
-            # Then check subdirectories (component directories)
             for comp_dir in category_dir.iterdir():
                 if comp_dir.is_dir():
-                    print(f"  Checking subdirectory: {comp_dir.name}")
                     for f in comp_dir.iterdir():
                         if f.is_file() and f.suffix.lower() in IMG_EXTS:
                             files.append(f)
-                            print(f"    Found image: {f.name}")
-            
-            print(f"Total images found in {category_dir.name}: {len(files)}")
             return files
 
         class UICategoryDataset(Dataset):
-            def __init__(self, split_root, category_to_idx, transform=None):
+            def __init__(self, split_root: Path, category_to_idx: dict, transform=None):
                 self.transform = transform
                 self.samples = []
                 self.category_to_idx = category_to_idx
-                
-                print(f"Initializing dataset from: {split_root}")
-                print(f"Expected categories: {list(category_to_idx.keys())}")
-                
                 for cat in sorted(category_to_idx.keys()):
                     cat_dir = split_root / cat
-                    print(f"\\nLooking for category: {cat}")
-                    print(f"Category directory: {cat_dir}")
-                    
                     if not cat_dir.exists(): 
-                        print(f"  Category directory does not exist, skipping: {cat}")
                         continue
-                        
                     for img_path in list_images_under_category(cat_dir):
                         self.samples.append((img_path, category_to_idx[cat]))
-                
-                print(f"Total samples found: {len(self.samples)}")
                 if len(self.samples) == 0:
-                    print("ERROR: No images found!")
-                    print("Available directories in split_root:")
-                    for item in split_root.iterdir():
-                        if item.is_dir():
-                            print(f"  - {item.name}/")
                     raise RuntimeError(f"No images found under {split_root}.")
 
-            def __len__(self):
+            def __len__(self): 
                 return len(self.samples)
 
             def __getitem__(self, idx):
                 path, y = self.samples[idx]
                 img = Image.open(path).convert("RGB")
-                if self.transform:
+                if self.transform: 
                     img = self.transform(img)
                 return img, y
 
@@ -218,35 +115,38 @@ implementation:
         parser.add_argument('--trained_model', type=str, required=True)
         parser.add_argument('--label_maps', type=str, required=True)
         parser.add_argument('--train_log', type=str, required=True)
-        parser.add_argument('--epochs', type=int, default=10)
-        parser.add_argument('--batch_size', type=int, default=32)
-        parser.add_argument('--lr', type=float, default=3e-4)
-        parser.add_argument('--weight_decay', type=float, default=1e-4)
-        parser.add_argument('--num_workers', type=int, default=2)
-        parser.add_argument('--seed', type=int, default=42)
         args = parser.parse_args()
 
-        print(f"Train dataset: {args.train_dataset}")
-        print(f"Val dataset: {args.val_dataset}")
-        print(f"Test dataset: {args.test_dataset}")
-        print(f"Model init: {args.model_init}")
+        print(f"Train dataset path: {args.train_dataset}")
+        print(f"Val dataset path: {args.val_dataset}")
+        print(f"Test dataset path: {args.test_dataset}")
+        print(f"Model init path: {args.model_init}")
         print(f"Model meta: {args.model_meta}")
         print(f"Trained model output: {args.trained_model}")
         print(f"Label maps output: {args.label_maps}")
         print(f"Train log output: {args.train_log}")
 
-        set_seed(args.seed)
-
+        # Training parameters
+        epochs = 10
+        batch_size = 32
+        lr = 3e-4
+        weight_decay = 1e-4
+        num_workers = 2
+        seed = 42
+        
+        set_seed(seed)
+        
         # Create output directories
         for output_path in [args.trained_model, args.label_maps, args.train_log]:
             output_dir = os.path.dirname(output_path)
             if output_dir and not os.path.exists(output_dir):
                 os.makedirs(output_dir, exist_ok=True)
+                print(f"Created directory: {output_dir}")
 
-        # Load metadata
+        # Load model metadata
         try:
             meta = json.loads(args.model_meta)
-            print("Loaded metadata from JSON string")
+            print(f"Successfully loaded model metadata")
         except Exception as e:
             print(f"Error loading model metadata: {e}")
             exit(1)
@@ -254,48 +154,13 @@ implementation:
         image_size = meta["image_size"]
         mean, std = meta["mean"], meta["std"]
         categories = meta["categories"]
-        category_to_idx = {c:i for i,c in enumerate(categories)}
-        idx_to_category = {i:c for c,i in category_to_idx.items()}
+        category_to_idx = {c: i for i, c in enumerate(categories)}
+        idx_to_category = {i: c for c, i in category_to_idx.items()}
 
-        # Handle dataset paths - extract if needed
-        print("=== PROCESSING TRAIN DATASET ===")
-        train_base = Path(args.train_dataset)
-        if (train_base / "data").exists():
-            train_data_file = train_base / "data"
-        else:
-            train_data_file = train_base
-            
-        if train_data_file.is_file():
-            train_path = extract_dataset_file(train_data_file, train_base / "extracted")
-        else:
-            train_path = train_data_file
-            
-        print("=== PROCESSING VAL DATASET ===")
-        val_base = Path(args.val_dataset)
-        if (val_base / "data").exists():
-            val_data_file = val_base / "data"
-        else:
-            val_data_file = val_base
-            
-        if val_data_file.is_file():
-            val_path = extract_dataset_file(val_data_file, val_base / "extracted")
-        else:
-            val_path = val_data_file
+        print(f"Image size: {image_size}")
+        print(f"Number of categories: {len(categories)}")
 
-        print(f"=== FINAL PATHS ===")
-        print(f"Train path: {train_path}")
-        print(f"Val path: {val_path}")
-        print(f"Train is dir: {train_path.is_dir()}")
-        print(f"Val is dir: {val_path.is_dir()}")
-
-        if not train_path.is_dir():
-            print(f"ERROR: Train path is not a directory!")
-            exit(1)
-        if not val_path.is_dir():
-            print(f"ERROR: Val path is not a directory!")
-            exit(1)
-
-        # Create transforms
+        # Data transforms
         train_tfms = transforms.Compose([
             transforms.Resize((image_size, image_size)),
             transforms.RandomHorizontalFlip(p=0.5),
@@ -313,105 +178,171 @@ implementation:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {device}")
 
-        # Build datasets/loaders
-        train_ds = UICategoryDataset(train_path, category_to_idx, transform=train_tfms)
-        val_ds   = UICategoryDataset(val_path, category_to_idx, transform=eval_tfms)
-        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                                  num_workers=args.num_workers, pin_memory=True)
-        val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                                  num_workers=args.num_workers, pin_memory=True)
-
-        # Load model - handle model file path
-        model_base = Path(args.model_init)
-        if (model_base / "data").exists():
-            model_file = model_base / "data"
-        else:
-            model_file = model_base
+        # Build datasets and loaders
+        def resolve_dataset_path(dataset_path_str):
+            """Resolve dataset path - handle both files and directories"""
+            dataset_path = Path(dataset_path_str)
+            print(f"Resolving dataset path: {dataset_path}")
             
-        print(f"Loading model from: {model_file}")
+            if dataset_path.is_file():
+                # If it's a file, check if it's in a directory we should use
+                parent_dir = dataset_path.parent
+                print(f"Input is a file, using parent directory: {parent_dir}")
+                return parent_dir
+            elif dataset_path.is_dir():
+                return dataset_path
+            else:
+                print(f"Path does not exist: {dataset_path}")
+                # Try some common patterns
+                possible_paths = [
+                    dataset_path,
+                    dataset_path.parent,
+                    dataset_path / "data",
+                ]
+                for p in possible_paths:
+                    if p.exists() and p.is_dir():
+                        print(f"Found valid path: {p}")
+                        return p
+                raise FileNotFoundError(f"Could not find valid dataset path from: {dataset_path}")
         
         try:
-            state = torch.load(model_file, map_location="cpu")
-            from torchvision.models import resnet50, ResNet50_Weights
+            train_path = resolve_dataset_path(args.train_dataset)
+            val_path = resolve_dataset_path(args.val_dataset)
+            
+            print(f"Using train dataset path: {train_path}")
+            print(f"Using val dataset path: {val_path}")
+            
+            train_ds = UICategoryDataset(train_path, category_to_idx, transform=train_tfms)
+            val_ds = UICategoryDataset(val_path, category_to_idx, transform=eval_tfms)
+            print(f"Train dataset size: {len(train_ds)}")
+            print(f"Val dataset size: {len(val_ds)}")
+        except Exception as e:
+            print(f"Error creating datasets: {e}")
+            print(f"Full error details:", str(e))
+            import traceback
+            traceback.print_exc()
+            exit(1)
+            
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                                  num_workers=num_workers, pin_memory=True)
+        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
+                               num_workers=num_workers, pin_memory=True)
+
+        # Load and setup model
+        try:
+            print(f"\n=== LOADING MODEL ===")
+            model_init_path = Path(args.model_init)
+            print(f"Model init path: {model_init_path}")
+            print(f"Model init exists: {model_init_path.exists()}")
+            print(f"Model init is file: {model_init_path.is_file()}")
+            
+            if model_init_path.is_file():
+                print(f"Loading model state dict from: {model_init_path}")
+                state = torch.load(model_init_path, map_location="cpu")
+            else:
+                raise FileNotFoundError(f"Model init file not found: {model_init_path}")
+                
+            # Rebuild the same architecture used in model definition
             m = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
             m.fc = nn.Sequential(nn.Dropout(p=0.2), nn.Linear(m.fc.in_features, len(categories)))
             m.load_state_dict(state, strict=True)
             m.to(device)
-            print("Model loaded successfully")
+            print("Successfully loaded and setup model")
         except Exception as e:
             print(f"Error loading model: {e}")
+            import traceback
+            traceback.print_exc()
             exit(1)
 
-        # Loss/optim/sched
+        # Loss, optimizer, scheduler
         criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
-        optimizer = torch.optim.AdamW(m.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        optimizer = torch.optim.AdamW(m.parameters(), lr=lr, weight_decay=weight_decay)
 
-        total_steps = args.epochs * (len(train_loader) if len(train_loader) > 0 else 1)
+        total_steps = epochs * (len(train_loader) if len(train_loader) > 0 else 1)
         warmup_steps = max(100, int(0.05 * total_steps))
+        
         def lr_lambda(step):
             if step < warmup_steps:
                 return float(step) / float(max(1, warmup_steps))
             progress = (step - warmup_steps) / float(max(1, total_steps - warmup_steps))
             return 0.5 * (1.0 + math.cos(math.pi * progress))
+            
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
         scaler = torch.cuda.amp.GradScaler()
 
-        # Train
+        # Training loop
         print("Starting training...")
         best_val_acc = 0.0
-        for epoch in range(1, args.epochs + 1):
-            m.train(); epoch_loss = 0.0; epoch_acc = 0.0; seen = 0
+        
+        for epoch in range(1, epochs + 1):
+            m.train()
+            epoch_loss = 0.0
+            epoch_acc = 0.0
+            seen = 0
             t0 = time.time()
+            
             for x, y in train_loader:
                 x, y = x.to(device), y.to(device)
                 optimizer.zero_grad(set_to_none=True)
+                
                 with torch.cuda.amp.autocast():
                     logits = m(x)
                     loss = criterion(logits, y)
+                    
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
                 scheduler.step()
+                
                 bs = y.size(0)
                 epoch_loss += loss.item() * bs
-                epoch_acc  += ((logits.argmax(1) == y).float().mean().item()) * bs
+                epoch_acc += ((logits.argmax(1) == y).float().mean().item()) * bs
                 seen += bs
+                
             train_loss = epoch_loss / max(1, seen)
-            train_acc  = epoch_acc  / max(1, seen)
+            train_acc = epoch_acc / max(1, seen)
             val_loss, val_acc = evaluate(m, val_loader, device, criterion)
             dt = time.time() - t0
-            print(f"Epoch {epoch:02d}/{args.epochs} | {dt:.1f}s | train loss {train_loss:.4f} acc {train_acc:.3f} | val loss {val_loss:.4f} acc {val_acc:.3f}")
+            
+            print(f"Epoch {epoch:02d}/{epochs} | {dt:.1f}s | train loss {train_loss:.4f} acc {train_acc:.3f} | val loss {val_loss:.4f} acc {val_acc:.3f}")
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                torch.save({
-                    "model_state": m.state_dict(),
-                    "category_to_idx": category_to_idx,
-                    "idx_to_category": idx_to_category,
-                    "image_size": image_size,
-                }, args.trained_model)
-                print(f"✓ Saved new best to {args.trained_model} (val_acc={val_acc:.3f})")
+                try:
+                    torch.save({
+                        "model_state": m.state_dict(),
+                        "category_to_idx": category_to_idx,
+                        "idx_to_category": idx_to_category,
+                        "image_size": image_size,
+                    }, args.trained_model)
+                    print(f"✓ Saved new best model (val_acc={val_acc:.3f})")
+                except Exception as e:
+                    print(f"Error saving trained model: {e}")
+                    exit(1)
 
-        # Save sidecar outputs
+        # Save output files
         try:
+            # Save label maps
             label_maps_data = {
-                "category_to_idx": category_to_idx, 
+                "category_to_idx": category_to_idx,
                 "idx_to_category": idx_to_category
             }
             with open(args.label_maps, 'w') as f:
                 json.dump(label_maps_data, f, indent=2)
+            print(f"Saved label maps to {args.label_maps}")
             
+            # Save training log
             train_log_data = {
                 "best_val_acc": best_val_acc
             }
             with open(args.train_log, 'w') as f:
                 json.dump(train_log_data, f, indent=2)
-            
-            print(f"Saved label maps to {args.label_maps}")
             print(f"Saved training log to {args.train_log}")
-            print(f"Best validation accuracy: {best_val_acc:.3f}")
+            
+            print(f"Training completed! Best validation accuracy: {best_val_acc:.3f}")
+            
         except Exception as e:
-            print(f"Error saving outputs: {e}")
+            print(f"Error saving output files: {e}")
             exit(1)
     args:
       - --train_dataset
