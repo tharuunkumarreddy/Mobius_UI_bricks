@@ -449,19 +449,20 @@ implementation:
             }
             with open(args.label_maps, 'w') as f:
                 json.dump(label_maps_data, f, indent=2)
-            print(f"Saved label maps to {args.label_maps}")
+            print("Saved label maps to " + args.label_maps)
             
             train_log_data = {
                 "best_val_acc": best_val_acc
             }
             with open(args.train_log, 'w') as f:
                 json.dump(train_log_data, f, indent=2)
-            print(f"Saved training log to {args.train_log}")
+            print("Saved training log to " + args.train_log)
             
-            print(f"Training completed! Best validation accuracy: {best_val_acc:.3f}")
+            best_acc_str = str(round(best_val_acc, 3))
+            print("Training completed! Best validation accuracy: " + best_acc_str)
             
         except Exception as e:
-            print(f"Error saving output files: {e}")
+            print("Error saving output files: " + str(e))
             exit(1)
     args:
       - --train_dataset
