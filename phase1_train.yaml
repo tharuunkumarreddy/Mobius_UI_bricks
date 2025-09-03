@@ -90,7 +90,13 @@ implementation:
                 with open(file_path, 'rb') as f:
                     magic = f.read(2)
                     # Pickle files start with specific magic bytes
-                    return magic in [b'\x80\x02', b'\x80\x03', b'\x80\x04', b'\x80\x05']
+                    magic_bytes = [
+                        bytes([0x80, 0x02]),
+                        bytes([0x80, 0x03]), 
+                        bytes([0x80, 0x04]),
+                        bytes([0x80, 0x05])
+                    ]
+                    return magic in magic_bytes
             except:
                 return False
 
