@@ -28,6 +28,7 @@ implementation:
         import random
         import time
         import os
+        import pickle
         from pathlib import Path
         import numpy as np
         import torch
@@ -103,21 +104,23 @@ implementation:
                         return True
                 else:
                     print("File is not a recognized archive format")
-                    try:
-                        with open(file_path, 'r') as f:
-                            content = f.read(500)
-                            print("File content preview: " + content)
-                    except:
-                        try:
-                            with open(file_path, 'rb') as f:
-                                content = f.read(100)
-                                print("File binary content preview: " + str(content))
-                        except:
-                            print("Cannot read file content")
                     return False
             except Exception as e:
                 print("Error during extraction: " + str(e))
                 return False
+
+        def load_pickled_dataset(file_path):
+            """Load dataset from pickle file"""
+            try:
+                print("Attempting to load pickle file: " + str(file_path))
+                with open(file_path, 'rb') as f:
+                    data = pickle.load(f)
+                print("Successfully loaded pickle data")
+                print("Pickle data keys: " + str(list(data.keys()) if isinstance(data, dict) else "Not a dict"))
+                return data
+            except Exception as e:
+                print("Error loading pickle file: " + str(e))
+                return None
 
         def process_dataset_input(input_path_str, dataset_name):
             input_path = Path(input_path_str)
@@ -126,11 +129,20 @@ implementation:
             print("Path exists: " + str(input_path.exists()))
             print("Path is file: " + str(input_path.is_file()))
             print("Path is dir: " + str(input_path.is_dir()))
+            
             if input_path.is_file():
                 file_size = input_path.stat().st_size
                 size_mb = file_size/1024/1024
                 print("File size: " + str(file_size) + " bytes (" + str(round(size_mb, 1)) + " MB)")
                 print("File suffix: " + str(input_path.suffix))
+                
+                # First try to load as pickle
+                pickle_data = load_pickled_dataset(input_path)
+                if pickle_data is not None:
+                    print("Successfully loaded as pickle file")
+                    return pickle_data
+                
+                # If not pickle, try to extract as archive
                 extract_dir = input_path.parent / (dataset_name + "_extracted")
                 if extract_archive(input_path, extract_dir):
                     extracted_contents = list(extract_dir.iterdir()) if extract_dir.exists() else []
@@ -144,8 +156,8 @@ implementation:
                         print("Using extraction directory: " + str(final_path))
                     return final_path
                 else:
-                    print("Failed to extract archive, treating as regular file")
-                    return input_path.parent
+                    print("Failed to extract archive and not a pickle file")
+                    return None
             elif input_path.is_dir():
                 print("Input is directory: " + str(input_path))
                 return input_path
@@ -154,11 +166,72 @@ implementation:
                 return None
 
         class UICategoryDataset(Dataset):
-            def __init__(self, split_root, category_to_idx, transform=None):
+            def __init__(self, dataset_input, category_to_idx, transform=None):
                 self.transform = transform
                 self.samples = []
                 self.category_to_idx = category_to_idx
-                split_root = Path(split_root)
+                
+                # Handle different input types
+                if isinstance(dataset_input, dict):
+                    # This is pickled dataset data
+                    print("Processing pickled dataset data")
+                    self._process_pickle_data(dataset_input)
+                elif isinstance(dataset_input, (str, Path)):
+                    # This is a directory path
+                    split_root = Path(dataset_input)
+                    print("Processing directory dataset: " + str(split_root))
+                    self._process_directory_data(split_root)
+                else:
+                    raise RuntimeError("Unsupported dataset input type: " + str(type(dataset_input)))
+                
+                if len(self.samples) == 0:
+                    expected_cats = list(category_to_idx.keys())
+                    raise RuntimeError("No samples found in dataset. Expected categories: " + str(expected_cats))
+
+            def _process_pickle_data(self, pickle_data):
+                """Process dataset from pickle data"""
+                print("Pickle data structure: " + str(pickle_data.keys()))
+                
+                # Check if data_path exists and points to actual data
+                if 'data_path' in pickle_data:
+                    data_path = Path(pickle_data['data_path'])
+                    print("Data path from pickle: " + str(data_path))
+                    if data_path.exists():
+                        print("Data path exists, processing as directory")
+                        self._process_directory_data(data_path)
+                        return
+                    else:
+                        print("Data path from pickle does not exist: " + str(data_path))
+                
+                # Check for direct image data in pickle
+                if 'images' in pickle_data and 'labels' in pickle_data:
+                    images = pickle_data['images']
+                    labels = pickle_data['labels']
+                    print("Found " + str(len(images)) + " images in pickle data")
+                    for img_path, label in zip(images, labels):
+                        if isinstance(label, str) and label in self.category_to_idx:
+                            self.samples.append((Path(img_path), self.category_to_idx[label]))
+                        elif isinstance(label, int) and label < len(self.category_to_idx):
+                            self.samples.append((Path(img_path), label))
+                    return
+                
+                # Check for samples directly
+                if 'samples' in pickle_data:
+                    samples = pickle_data['samples']
+                    print("Found " + str(len(samples)) + " samples in pickle data")
+                    for sample in samples:
+                        if isinstance(sample, (list, tuple)) and len(sample) == 2:
+                            img_path, label = sample
+                            if isinstance(label, str) and label in self.category_to_idx:
+                                self.samples.append((Path(img_path), self.category_to_idx[label]))
+                            elif isinstance(label, int) and label < len(self.category_to_idx):
+                                self.samples.append((Path(img_path), label))
+                    return
+                
+                print("Could not find recognizable data structure in pickle file")
+
+            def _process_directory_data(self, split_root):
+                """Process dataset from directory structure"""
                 print("Looking for dataset at: " + str(split_root))
                 print("Dataset path exists: " + str(split_root.exists()))
                 if split_root.is_file():
@@ -167,23 +240,27 @@ implementation:
                 if not split_root.exists():
                     print("Dataset path does not exist: " + str(split_root))
                     raise RuntimeError("Dataset path does not exist: " + str(split_root))
+                    
                 contents = list(split_root.iterdir()) if split_root.exists() else []
                 content_names = [str(c.name) for c in contents]
                 print("Contents of " + str(split_root) + ": " + str(content_names))
-                category_dirs = [d for d in contents if d.is_dir() and d.name in category_to_idx]
+                category_dirs = [d for d in contents if d.is_dir() and d.name in self.category_to_idx]
                 category_names = [d.name for d in category_dirs]
                 print("Found category directories: " + str(category_names))
+                
                 if len(category_dirs) == 0:
                     if len(contents) == 1 and contents[0].is_dir():
                         data_dir = contents[0]
                         print("Checking single subdirectory: " + str(data_dir))
                         sub_contents = list(data_dir.iterdir()) if data_dir.exists() else []
-                        sub_category_dirs = [d for d in sub_contents if d.is_dir() and d.name in category_to_idx]
+                        sub_category_dirs = [d for d in sub_contents if d.is_dir() and d.name in self.category_to_idx]
                         if len(sub_category_dirs) > 0:
                             sub_category_names = [d.name for d in sub_category_dirs]
                             print("Found category directories in subdirectory: " + str(sub_category_names))
                             split_root = data_dir
-                for cat in sorted(category_to_idx.keys()):
+                            category_dirs = sub_category_dirs
+                
+                for cat in sorted(self.category_to_idx.keys()):
                     cat_dir = split_root / cat
                     if not cat_dir.exists(): 
                         print("Category directory not found: " + str(cat_dir))
@@ -191,25 +268,25 @@ implementation:
                     img_paths = list_images_under_category(cat_dir)
                     print("Found " + str(len(img_paths)) + " images in category '" + cat + "'")
                     for img_path in img_paths:
-                        self.samples.append((img_path, category_to_idx[cat]))
-                if len(self.samples) == 0:
-                    all_images = find_images_recursively(split_root)
-                    print("Total images found recursively in " + str(split_root) + ": " + str(len(all_images)))
-                    if len(all_images) > 0:
-                        sample_paths = [str(p) for p in all_images[:5]]
-                        print("Sample image paths: " + str(sample_paths))
-                    expected_cats = list(category_to_idx.keys())
-                    raise RuntimeError("No images found under " + str(split_root) + ". Expected categories: " + str(expected_cats))
+                        self.samples.append((img_path, self.category_to_idx[cat]))
 
             def __len__(self): 
                 return len(self.samples)
 
             def __getitem__(self, idx):
                 path, y = self.samples[idx]
-                img = Image.open(path).convert("RGB")
-                if self.transform: 
-                    img = self.transform(img)
-                return img, y
+                try:
+                    img = Image.open(path).convert("RGB")
+                    if self.transform: 
+                        img = self.transform(img)
+                    return img, y
+                except Exception as e:
+                    print("Error loading image " + str(path) + ": " + str(e))
+                    # Return a dummy image if loading fails
+                    img = Image.new('RGB', (224, 224), color='black')
+                    if self.transform:
+                        img = self.transform(img)
+                    return img, y
 
         def accuracy(outputs, targets):
             preds = outputs.argmax(dim=1)
@@ -301,23 +378,27 @@ implementation:
 
         try:
             print("=== PROCESSING DATASETS ===")
-            train_path = process_dataset_input(args.train_dataset, "train")
-            val_path = process_dataset_input(args.val_dataset, "val")
-            print("=== FINAL PATHS ===")
-            print("Train path: " + str(train_path))
-            print("Val path: " + str(val_path))
-            train_valid = train_path and train_path.exists() and train_path.is_dir()
-            val_valid = val_path and val_path.exists() and val_path.is_dir()
-            print("Train exists and is dir: " + str(train_valid))
-            print("Val exists and is dir: " + str(val_valid))
-            if not train_path or not train_path.exists() or not train_path.is_dir():
-                raise RuntimeError("Invalid train dataset path: " + str(train_path))
-            if not val_path or not val_path.exists() or not val_path.is_dir():
-                raise RuntimeError("Invalid val dataset path: " + str(val_path))
-            train_ds = UICategoryDataset(train_path, category_to_idx, transform=train_tfms)
-            val_ds = UICategoryDataset(val_path, category_to_idx, transform=eval_tfms)
+            train_data = process_dataset_input(args.train_dataset, "train")
+            val_data = process_dataset_input(args.val_dataset, "val")
+            print("=== FINAL DATA ===")
+            print("Train data type: " + str(type(train_data)))
+            print("Val data type: " + str(type(val_data)))
+            
+            if train_data is None:
+                raise RuntimeError("Failed to process train dataset")
+            if val_data is None:
+                raise RuntimeError("Failed to process val dataset")
+                
+            train_ds = UICategoryDataset(train_data, category_to_idx, transform=train_tfms)
+            val_ds = UICategoryDataset(val_data, category_to_idx, transform=eval_tfms)
             print("Train dataset size: " + str(len(train_ds)))
             print("Val dataset size: " + str(len(val_ds)))
+            
+            if len(train_ds) == 0:
+                raise RuntimeError("Train dataset is empty")
+            if len(val_ds) == 0:
+                raise RuntimeError("Validation dataset is empty")
+                
         except Exception as e:
             print("Error creating datasets: " + str(e))
             print("Full error details: " + str(e))
