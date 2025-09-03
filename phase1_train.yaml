@@ -208,7 +208,7 @@ implementation:
                     raise RuntimeError("No samples found in dataset. Expected categories: " + str(expected_cats))
 
             def _process_pickle_data(self, pickle_data):
-                """Process dataset from pickle data"""
+                # Process dataset from pickle data
                 print("Pickle data structure: " + str(list(pickle_data.keys())))
                 
                 # Check if data_path exists and points to actual data
@@ -250,7 +250,7 @@ implementation:
                 print("Could not find recognizable data structure in pickle file")
 
             def _process_directory_data(self, split_root):
-                """Process dataset from directory structure"""
+                # Process dataset from directory structure
                 print("Looking for dataset at: " + str(split_root))
                 print("Dataset path exists: " + str(split_root.exists()))
                 if split_root.is_file():
