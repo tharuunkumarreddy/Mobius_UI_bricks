@@ -1,317 +1,84 @@
-name: Phase1 Train Model
-description: Trains the Phase 1 ResNet50 classifier for UI component classification using provided datasets and model initialization.
+name: phase1_train
+description: Train the Phase 1 ResNet50 classifier, output best model and logs.
 inputs:
-  - {name: train_dataset, type: Dataset}
-  - {name: val_dataset, type: Dataset}
-  - {name: test_dataset, type: Dataset}
-  - {name: model_init, type: Model}
-  - {name: model_meta, type: String}
+  - {name: train_data, type: Dataset, description: "Training dataset"}
+  - {name: val_data, type: Dataset, description: "Validation dataset"}
+  - {name: test_data, type: Dataset, description: "Test dataset"}
+  - {name: phase1_model_init, type: Model, description: "Model initialization weights (phase1_model_init.pt)"}
+  - {name: phase1_model_meta, type: String, description: "Model metadata (phase1_model_meta.json)"}
+
 outputs:
-  - {name: trained_model, type: Model}
-  - {name: label_maps, type: String}
-  - {name: train_log, type: String}
+  - {name: phase1_resnet50_best, type: Model, description: "Best model checkpoint (phase1_resnet50_best.pt)"}
+  - {name: phase1_label_maps, type: Dataset, description: "Category to index and index to category mapping (phase1_label_maps.json)"}
+  - {name: phase1_train_log, type: Dataset, description: "Training log with best validation accuracy (phase1_train_log.json)"}
+
 implementation:
   container:
-    image: pytorch/pytorch:2.0.1-cuda11.7-cudnn8-runtime
+    image: python:3.9
     command:
-      - sh
-      - -c
+      - bash
+      - -ec
       - |
-        exec "$0" "$@"
-      - python3
-      - -u
-      - -c
-      - |
-        import argparse
-        import json
-        import math
-        import random
-        import time
-        import os
-        import pickle
+        set -euo pipefail
+
+        # ---- System & Python deps ----
+        apt-get update -y && apt-get install -y python3-pip
+        python -m pip install --no-cache-dir torch torchvision pillow
+
+        # ---- Set environment variables for the script ----
+        export TRAIN_DATA_PATH="$1"
+        export VAL_DATA_PATH="$2"
+        export TEST_DATA_PATH="$3"
+        export MODEL_INIT_PATH="$4"
+        export MODEL_META_PATH="$5"
+        export OUTPUT_DIR="$6"
+
+        # ---- Python script for training ----
+        cat > /tmp/phase1_train.py <<'PY'
+        import argparse, json, time, random, torch, torch.nn as nn
         from pathlib import Path
-        import numpy as np
-        import torch
-        import torch.nn as nn
-        import torch.backends.cudnn as cudnn
         from torch.utils.data import Dataset, DataLoader
         from torchvision import transforms
-        from torchvision.models import resnet50, ResNet50_Weights
         from PIL import Image
-        import subprocess
-        import sys
-        import tarfile
-        import zipfile
-        import shutil
-        
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "torchvision", "Pillow"])
-        
+
+        # Constants
         IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
         def set_seed(seed=42):
             random.seed(seed)
-            np.random.seed(seed)
             torch.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
-            cudnn.deterministic = False
-            cudnn.benchmark = True
 
-        def find_images_recursively(root_dir):
+        def list_images_under_category(category_dir: Path):
             files = []
-            if root_dir.is_file():
-                if root_dir.suffix.lower() in IMG_EXTS:
-                    files.append(root_dir)
-                return files
-            for item in root_dir.rglob('*'):
-                if item.is_file() and item.suffix.lower() in IMG_EXTS:
-                    files.append(item)
+            for comp_dir in category_dir.iterdir():
+                if comp_dir.is_dir():
+                    for f in comp_dir.iterdir():
+                        if f.is_file() and f.suffix.lower() in IMG_EXTS:
+                            files.append(f)
             return files
-
-        def list_images_under_category(category_dir):
-            files = []
-            if not category_dir.exists():
-                return files
-            has_subdirs = any(item.is_dir() for item in category_dir.iterdir())
-            if has_subdirs:
-                for comp_dir in category_dir.iterdir():
-                    if comp_dir.is_dir():
-                        for f in comp_dir.iterdir():
-                            if f.is_file() and f.suffix.lower() in IMG_EXTS:
-                                files.append(f)
-            else:
-                for f in category_dir.iterdir():
-                    if f.is_file() and f.suffix.lower() in IMG_EXTS:
-                        files.append(f)
-            return files
-
-        def is_pickle_file(file_path):
-            # Check if file is a pickle file by reading magic bytes
-            try:
-                with open(file_path, 'rb') as f:
-                    magic = f.read(2)
-                    # Pickle files start with specific magic bytes
-                    magic_bytes = [
-                        bytes([0x80, 0x02]),
-                        bytes([0x80, 0x03]), 
-                        bytes([0x80, 0x04]),
-                        bytes([0x80, 0x05])
-                    ]
-                    return magic in magic_bytes
-            except:
-                return False
-
-        def load_pickled_dataset(file_path):
-            # Load dataset from pickle file
-            try:
-                print("Attempting to load pickle file: " + str(file_path))
-                with open(file_path, 'rb') as f:
-                    data = pickle.load(f)
-                print("Successfully loaded pickle data")
-                print("Pickle data keys: " + str(list(data.keys()) if isinstance(data, dict) else "Not a dict"))
-                return data
-            except Exception as e:
-                print("Error loading pickle file: " + str(e))
-                return None
-
-        def extract_archive(file_path, extract_to):
-            file_path = Path(file_path)
-            extract_to = Path(extract_to)
-            print("Extracting " + str(file_path) + " to " + str(extract_to))
-            extract_to.mkdir(parents=True, exist_ok=True)
-            try:
-                if tarfile.is_tarfile(str(file_path)):
-                    print("Detected tar archive")
-                    with tarfile.open(str(file_path), 'r:*') as tar:
-                        tar.extractall(path=str(extract_to))
-                        print("Tar extraction successful")
-                        return True
-                elif zipfile.is_zipfile(str(file_path)):
-                    print("Detected zip archive")
-                    with zipfile.ZipFile(str(file_path), 'r') as zip_ref:
-                        zip_ref.extractall(str(extract_to))
-                        print("Zip extraction successful")
-                        return True
-                else:
-                    print("File is not a recognized archive format")
-                    return False
-            except Exception as e:
-                print("Error during extraction: " + str(e))
-                return False
-
-        def process_dataset_input(input_path_str, dataset_name):
-            input_path = Path(input_path_str)
-            print("=== PROCESSING " + dataset_name.upper() + " DATASET ===")
-            print("Input path: " + str(input_path))
-            print("Path exists: " + str(input_path.exists()))
-            print("Path is file: " + str(input_path.is_file()))
-            print("Path is dir: " + str(input_path.is_dir()))
-            
-            if input_path.is_file():
-                file_size = input_path.stat().st_size
-                size_mb = file_size/1024/1024
-                print("File size: " + str(file_size) + " bytes (" + str(round(size_mb, 1)) + " MB)")
-                print("File suffix: " + str(input_path.suffix))
-                
-                # Check if it's a pickle file first
-                if is_pickle_file(input_path):
-                    print("Detected pickle file format")
-                    pickle_data = load_pickled_dataset(input_path)
-                    if pickle_data is not None:
-                        print("Successfully loaded as pickle file")
-                        return pickle_data
-                    else:
-                        print("Failed to load pickle file")
-                        return None
-                
-                # If not pickle, try to extract as archive
-                extract_dir = input_path.parent / (dataset_name + "_extracted")
-                if extract_archive(input_path, extract_dir):
-                    extracted_contents = list(extract_dir.iterdir()) if extract_dir.exists() else []
-                    content_names = [c.name for c in extracted_contents]
-                    print("Extracted contents: " + str(content_names))
-                    if len(extracted_contents) == 1 and extracted_contents[0].is_dir():
-                        final_path = extracted_contents[0]
-                        print("Using extracted subdirectory: " + str(final_path))
-                    else:
-                        final_path = extract_dir
-                        print("Using extraction directory: " + str(final_path))
-                    return final_path
-                else:
-                    print("Failed to extract archive")
-                    return None
-            elif input_path.is_dir():
-                print("Input is directory: " + str(input_path))
-                return input_path
-            else:
-                print("Input path does not exist: " + str(input_path))
-                return None
 
         class UICategoryDataset(Dataset):
-            def __init__(self, dataset_input, category_to_idx, transform=None):
+            def __init__(self, split_root: Path, category_to_idx: dict, transform=None):
                 self.transform = transform
                 self.samples = []
                 self.category_to_idx = category_to_idx
-                
-                print("Dataset input type: " + str(type(dataset_input)))
-                
-                # Handle different input types
-                if isinstance(dataset_input, dict):
-                    # This is pickled dataset data
-                    print("Processing pickled dataset data")
-                    self._process_pickle_data(dataset_input)
-                elif isinstance(dataset_input, (str, Path)):
-                    # This is a directory path
-                    split_root = Path(dataset_input)
-                    print("Processing directory dataset: " + str(split_root))
-                    self._process_directory_data(split_root)
-                else:
-                    print("Unsupported dataset input type, trying as directory: " + str(dataset_input))
-                    split_root = Path(str(dataset_input))
-                    self._process_directory_data(split_root)
-                
-                if len(self.samples) == 0:
-                    expected_cats = list(category_to_idx.keys())
-                    raise RuntimeError("No samples found in dataset. Expected categories: " + str(expected_cats))
-
-            def _process_pickle_data(self, pickle_data):
-                # Process dataset from pickle data
-                print("Pickle data structure: " + str(list(pickle_data.keys())))
-                
-                # Check if data_path exists and points to actual data
-                if 'data_path' in pickle_data:
-                    data_path = Path(pickle_data['data_path'])
-                    print("Data path from pickle: " + str(data_path))
-                    if data_path.exists():
-                        print("Data path exists, processing as directory")
-                        self._process_directory_data(data_path)
-                        return
-                    else:
-                        print("Data path from pickle does not exist: " + str(data_path))
-                
-                # Check for direct image data in pickle
-                if 'images' in pickle_data and 'labels' in pickle_data:
-                    images = pickle_data['images']
-                    labels = pickle_data['labels']
-                    print("Found " + str(len(images)) + " images in pickle data")
-                    for img_path, label in zip(images, labels):
-                        if isinstance(label, str) and label in self.category_to_idx:
-                            self.samples.append((Path(img_path), self.category_to_idx[label]))
-                        elif isinstance(label, int) and label < len(self.category_to_idx):
-                            self.samples.append((Path(img_path), label))
-                    return
-                
-                # Check for samples directly
-                if 'samples' in pickle_data:
-                    samples = pickle_data['samples']
-                    print("Found " + str(len(samples)) + " samples in pickle data")
-                    for sample in samples:
-                        if isinstance(sample, (list, tuple)) and len(sample) == 2:
-                            img_path, label = sample
-                            if isinstance(label, str) and label in self.category_to_idx:
-                                self.samples.append((Path(img_path), self.category_to_idx[label]))
-                            elif isinstance(label, int) and label < len(self.category_to_idx):
-                                self.samples.append((Path(img_path), label))
-                    return
-                
-                print("Could not find recognizable data structure in pickle file")
-
-            def _process_directory_data(self, split_root):
-                # Process dataset from directory structure
-                print("Looking for dataset at: " + str(split_root))
-                print("Dataset path exists: " + str(split_root.exists()))
-                if split_root.is_file():
-                    print("Input is a file, not a directory: " + str(split_root))
-                    raise RuntimeError("Expected directory but got file: " + str(split_root))
-                if not split_root.exists():
-                    print("Dataset path does not exist: " + str(split_root))
-                    raise RuntimeError("Dataset path does not exist: " + str(split_root))
-                    
-                contents = list(split_root.iterdir()) if split_root.exists() else []
-                content_names = [str(c.name) for c in contents]
-                print("Contents of " + str(split_root) + ": " + str(content_names))
-                category_dirs = [d for d in contents if d.is_dir() and d.name in self.category_to_idx]
-                category_names = [d.name for d in category_dirs]
-                print("Found category directories: " + str(category_names))
-                
-                if len(category_dirs) == 0:
-                    if len(contents) == 1 and contents[0].is_dir():
-                        data_dir = contents[0]
-                        print("Checking single subdirectory: " + str(data_dir))
-                        sub_contents = list(data_dir.iterdir()) if data_dir.exists() else []
-                        sub_category_dirs = [d for d in sub_contents if d.is_dir() and d.name in self.category_to_idx]
-                        if len(sub_category_dirs) > 0:
-                            sub_category_names = [d.name for d in sub_category_dirs]
-                            print("Found category directories in subdirectory: " + str(sub_category_names))
-                            split_root = data_dir
-                            category_dirs = sub_category_dirs
-                
-                for cat in sorted(self.category_to_idx.keys()):
+                for cat in sorted(category_to_idx.keys()):
                     cat_dir = split_root / cat
                     if not cat_dir.exists(): 
-                        print("Category directory not found: " + str(cat_dir))
                         continue
-                    img_paths = list_images_under_category(cat_dir)
-                    print("Found " + str(len(img_paths)) + " images in category '" + cat + "'")
-                    for img_path in img_paths:
-                        self.samples.append((img_path, self.category_to_idx[cat]))
+                    for img_path in list_images_under_category(cat_dir):
+                        self.samples.append((img_path, category_to_idx[cat]))
+                if len(self.samples) == 0:
+                    raise RuntimeError(f"No images found under {split_root}.")
 
-            def __len__(self): 
-                return len(self.samples)
+            def __len__(self): return len(self.samples)
 
             def __getitem__(self, idx):
                 path, y = self.samples[idx]
-                try:
-                    img = Image.open(path).convert("RGB")
-                    if self.transform: 
-                        img = self.transform(img)
-                    return img, y
-                except Exception as e:
-                    print("Error loading image " + str(path) + ": " + str(e))
-                    # Return a dummy image if loading fails
-                    img = Image.new('RGB', (224, 224), color='black')
-                    if self.transform:
-                        img = self.transform(img)
-                    return img, y
+                img = Image.open(path).convert("RGB")
+                if self.transform: img = self.transform(img)
+                return img, y
 
         def accuracy(outputs, targets):
             preds = outputs.argmax(dim=1)
@@ -332,235 +99,114 @@ implementation:
                     n += bs
             return running_loss / n, running_acc / n
 
-        parser = argparse.ArgumentParser()
-        parser.add_argument('--train_dataset', type=str, required=True)
-        parser.add_argument('--val_dataset', type=str, required=True)
-        parser.add_argument('--test_dataset', type=str, required=True)
-        parser.add_argument('--model_init', type=str, required=True)
-        parser.add_argument('--model_meta', type=str, required=True)
-        parser.add_argument('--trained_model', type=str, required=True)
-        parser.add_argument('--label_maps', type=str, required=True)
-        parser.add_argument('--train_log', type=str, required=True)
-        args = parser.parse_args()
+        def main():
+            ap = argparse.ArgumentParser()
+            ap.add_argument("--dataset_root", type=Path, required=True, help="Root for train, val, test datasets")
+            ap.add_argument("--model_init", type=Path, required=True, help="Path to model initialization weights")
+            ap.add_argument("--model_meta", type=Path, required=True, help="Path to model metadata")
+            ap.add_argument("--out_dir", type=Path, required=True, help="Output directory for model and logs")
+            ap.add_argument("--epochs", type=int, default=10)
+            ap.add_argument("--batch_size", type=int, default=32)
+            ap.add_argument("--lr", type=float, default=3e-4)
+            ap.add_argument("--weight_decay", type=float, default=1e-4)
+            ap.add_argument("--num_workers", type=int, default=2)
+            ap.add_argument("--seed", type=int, default=42)
+            args = ap.parse_args()
 
-        print("Train dataset: " + args.train_dataset)
-        print("Val dataset: " + args.val_dataset)
-        print("Test dataset: " + args.test_dataset)
-        print("Model init: " + args.model_init)
-        print("Model meta: " + args.model_meta)
-        print("Trained model output: " + args.trained_model)
-        print("Label maps output: " + args.label_maps)
-        print("Train log output: " + args.train_log)
+            set_seed(args.seed)
+            args.out_dir.mkdir(parents=True, exist_ok=True)
 
-        epochs = 10
-        batch_size = 32
-        lr = 3e-4
-        weight_decay = 1e-4
-        num_workers = 2
-        seed = 42
-        set_seed(seed)
-        
-        for output_path in [args.trained_model, args.label_maps, args.train_log]:
-            output_dir = os.path.dirname(output_path)
-            if output_dir and not os.path.exists(output_dir):
-                os.makedirs(output_dir, exist_ok=True)
-                print("Created directory: " + output_dir)
+            meta = json.loads(Path(args.model_meta).read_text())
+            categories = meta["categories"]
+            category_to_idx = {c:i for i,c in enumerate(categories)}
+            idx_to_category = {i:c for c,i in category_to_idx.items()}
 
-        try:
-            meta = json.loads(args.model_meta)
-            print("Successfully loaded model metadata")
-            print("Loaded metadata from JSON string")
-        except Exception as e:
-            print("Error loading model metadata: " + str(e))
-            exit(1)
-            
-        image_size = meta["image_size"]
-        mean, std = meta["mean"], meta["std"]
-        categories = meta["categories"]
-        category_to_idx = {c: i for i, c in enumerate(categories)}
-        idx_to_category = {i: c for c, i in category_to_idx.items()}
+            # Transformations
+            image_size = meta["image_size"]
+            train_tfms = transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomResizedCrop(image_size),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=meta["mean"], std=meta["std"]),
+            ])
+            eval_tfms = transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=meta["mean"], std=meta["std"]),
+            ])
 
-        print("Image size: " + str(image_size))
-        print("Number of categories: " + str(len(categories)))
-        print("Categories: " + str(categories))
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        train_tfms = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.15, hue=0.02),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
-        ])
-        eval_tfms = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
-        ])
+            # Load datasets and dataloaders
+            train_ds = UICategoryDataset(args.dataset_root / "train", category_to_idx, transform=train_tfms)
+            val_ds   = UICategoryDataset(args.dataset_root / "val", category_to_idx, transform=eval_tfms)
+            train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
+            val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print("Using device: " + str(device))
+            # Load model
+            state = torch.load(args.model_init, map_location=device)
+            from torchvision.models import resnet50
+            model = resnet50(pretrained=False)
+            model.fc = nn.Sequential(nn.Dropout(p=0.2), nn.Linear(model.fc.in_features, len(categories)))
+            model.load_state_dict(state, strict=True)
+            model.to(device)
 
-        try:
-            print("=== PROCESSING DATASETS ===")
-            train_data = process_dataset_input(args.train_dataset, "train")
-            val_data = process_dataset_input(args.val_dataset, "val")
-            print("=== FINAL DATA ===")
-            print("Train data type: " + str(type(train_data)))
-            print("Val data type: " + str(type(val_data)))
-            
-            if train_data is None:
-                raise RuntimeError("Failed to process train dataset")
-            if val_data is None:
-                raise RuntimeError("Failed to process val dataset")
-                
-            train_ds = UICategoryDataset(train_data, category_to_idx, transform=train_tfms)
-            val_ds = UICategoryDataset(val_data, category_to_idx, transform=eval_tfms)
-            print("Train dataset size: " + str(len(train_ds)))
-            print("Val dataset size: " + str(len(val_ds)))
-            
-            if len(train_ds) == 0:
-                raise RuntimeError("Train dataset is empty")
-            if len(val_ds) == 0:
-                raise RuntimeError("Validation dataset is empty")
-                
-        except Exception as e:
-            print("Error creating datasets: " + str(e))
-            print("Full error details: " + str(e))
-            import traceback
-            traceback.print_exc()
-            exit(1)
-            
-        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+            # Loss, optimizer, and scheduler
+            criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
+            optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-        try:
-            print("=== LOADING MODEL ===")
-            model_init_path = Path(args.model_init)
-            print("Model init path: " + str(model_init_path))
-            print("Model init exists: " + str(model_init_path.exists()))
-            print("Model init is file: " + str(model_init_path.is_file()))
-            if model_init_path.is_file():
-                print("Loading model state dict from: " + str(model_init_path))
-                state = torch.load(model_init_path, map_location="cpu")
-            else:
-                raise FileNotFoundError("Model init file not found: " + str(model_init_path))
-            m = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
-            m.fc = nn.Sequential(nn.Dropout(p=0.2), nn.Linear(m.fc.in_features, len(categories)))
-            m.load_state_dict(state, strict=True)
-            m.to(device)
-            print("Successfully loaded and setup model")
-        except Exception as e:
-            print("Error loading model: " + str(e))
-            import traceback
-            traceback.print_exc()
-            exit(1)
+            best_val_acc = 0.0
+            for epoch in range(1, args.epochs + 1):
+                model.train()
+                epoch_loss = 0.0
+                epoch_acc = 0.0
+                seen = 0
+                for x, y in train_loader:
+                    x, y = x.to(device), y.to(device)
+                    optimizer.zero_grad()
+                    with torch.cuda.amp.autocast():
+                        logits = model(x)
+                        loss = criterion(logits, y)
+                    loss.backward()
+                    optimizer.step()
+                    epoch_loss += loss.item() * y.size(0)
+                    epoch_acc += accuracy(logits, y) * y.size(0)
+                    seen += y.size(0)
 
-        criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
-        optimizer = torch.optim.AdamW(m.parameters(), lr=lr, weight_decay=weight_decay)
+                train_loss = epoch_loss / seen
+                train_acc = epoch_acc / seen
+                val_loss, val_acc = evaluate(model, val_loader, device, criterion)
 
-        total_steps = epochs * (len(train_loader) if len(train_loader) > 0 else 1)
-        warmup_steps = max(100, int(0.05 * total_steps))
-        
-        def lr_lambda(step):
-            if step < warmup_steps:
-                return float(step) / float(max(1, warmup_steps))
-            progress = (step - warmup_steps) / float(max(1, total_steps - warmup_steps))
-            return 0.5 * (1.0 + math.cos(math.pi * progress))
-            
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-        scaler = torch.cuda.amp.GradScaler()
-
-        print("Starting training...")
-        best_val_acc = 0.0
-        
-        for epoch in range(1, epochs + 1):
-            m.train()
-            epoch_loss = 0.0
-            epoch_acc = 0.0
-            seen = 0
-            t0 = time.time()
-            
-            for x, y in train_loader:
-                x, y = x.to(device), y.to(device)
-                optimizer.zero_grad(set_to_none=True)
-                with torch.cuda.amp.autocast():
-                    logits = m(x)
-                    loss = criterion(logits, y)
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-                scheduler.step()
-                bs = y.size(0)
-                epoch_loss += loss.item() * bs
-                epoch_acc += ((logits.argmax(1) == y).float().mean().item()) * bs
-                seen += bs
-                
-            train_loss = epoch_loss / max(1, seen)
-            train_acc = epoch_acc / max(1, seen)
-            val_loss, val_acc = evaluate(m, val_loader, device, criterion)
-            dt = time.time() - t0
-            
-            epoch_str = str(epoch).zfill(2)
-            dt_str = str(round(dt, 1))
-            train_loss_str = str(round(train_loss, 4))
-            train_acc_str = str(round(train_acc, 3))
-            val_loss_str = str(round(val_loss, 4))
-            val_acc_str = str(round(val_acc, 3))
-            
-            print("Epoch " + epoch_str + "/" + str(epochs) + " | " + dt_str + "s | train loss " + train_loss_str + " acc " + train_acc_str + " | val loss " + val_loss_str + " acc " + val_acc_str)
-
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                try:
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
                     torch.save({
-                        "model_state": m.state_dict(),
+                        "model_state": model.state_dict(),
                         "category_to_idx": category_to_idx,
                         "idx_to_category": idx_to_category,
                         "image_size": image_size,
-                    }, args.trained_model)
-                    val_acc_str = str(round(val_acc, 3))
-                    print("Saved new best model (val_acc=" + val_acc_str + ")")
-                except Exception as e:
-                    print("Error saving trained model: " + str(e))
-                    exit(1)
+                    }, args.out_dir / "phase1_resnet50_best.pt")
 
-        try:
-            label_maps_data = {
+            # Save outputs
+            (args.out_dir / "phase1_label_maps.json").write_text(json.dumps({
                 "category_to_idx": category_to_idx,
                 "idx_to_category": idx_to_category
-            }
-            with open(args.label_maps, 'w') as f:
-                json.dump(label_maps_data, f, indent=2)
-            print("Saved label maps to " + args.label_maps)
-            
-            train_log_data = {
+            }, indent=2))
+            (args.out_dir / "phase1_train_log.json").write_text(json.dumps({
                 "best_val_acc": best_val_acc
-            }
-            with open(args.train_log, 'w') as f:
-                json.dump(train_log_data, f, indent=2)
-            print("Saved training log to " + args.train_log)
-            
-            best_acc_str = str(round(best_val_acc, 3))
-            print("Training completed! Best validation accuracy: " + best_acc_str)
-            
-        except Exception as e:
-            print("Error saving output files: " + str(e))
-            exit(1)
+            }, indent=2))
+
+        if __name__ == "__main__":
+            main()
+        PY
+
+        python /tmp/phase1_train.py
     args:
-      - --train_dataset
-      - {inputPath: train_dataset}
-      - --val_dataset
-      - {inputPath: val_dataset}
-      - --test_dataset
-      - {inputPath: test_dataset}
-      - --model_init
-      - {inputPath: model_init}
-      - --model_meta
-      - {inputValue: model_meta}
-      - --trained_model
-      - {outputPath: trained_model}
-      - --label_maps
-      - {outputPath: label_maps}
-      - --train_log
-      - {outputPath: train_log}
+      - {inputPath: train_data}
+      - {inputPath: val_data}
+      - {inputPath: test_data}
+      - {inputPath: phase1_model_init}
+      - {inputPath: phase1_model_meta}
+      - {outputPath: phase1_resnet50_best}
+      - {outputPath: phase1_label_maps}
+      - {outputPath: phase1_train_log}
