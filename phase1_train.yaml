@@ -84,6 +84,29 @@ implementation:
                         files.append(f)
             return files
 
+        def is_pickle_file(file_path):
+            """Check if file is a pickle file by checking the magic bytes"""
+            try:
+                with open(file_path, 'rb') as f:
+                    magic = f.read(2)
+                    # Pickle files typically start with specific magic bytes
+                    return magic in [b'\x80\x02', b'\x80\x03', b'\x80\x04', b'\x80\x05']
+            except:
+                return False
+
+        def load_pickled_dataset(file_path):
+            """Load dataset from pickle file"""
+            try:
+                print("Attempting to load pickle file: " + str(file_path))
+                with open(file_path, 'rb') as f:
+                    data = pickle.load(f)
+                print("Successfully loaded pickle data")
+                print("Pickle data keys: " + str(list(data.keys()) if isinstance(data, dict) else "Not a dict"))
+                return data
+            except Exception as e:
+                print("Error loading pickle file: " + str(e))
+                return None
+
         def extract_archive(file_path, extract_to):
             file_path = Path(file_path)
             extract_to = Path(extract_to)
@@ -109,19 +132,6 @@ implementation:
                 print("Error during extraction: " + str(e))
                 return False
 
-        def load_pickled_dataset(file_path):
-            """Load dataset from pickle file"""
-            try:
-                print("Attempting to load pickle file: " + str(file_path))
-                with open(file_path, 'rb') as f:
-                    data = pickle.load(f)
-                print("Successfully loaded pickle data")
-                print("Pickle data keys: " + str(list(data.keys()) if isinstance(data, dict) else "Not a dict"))
-                return data
-            except Exception as e:
-                print("Error loading pickle file: " + str(e))
-                return None
-
         def process_dataset_input(input_path_str, dataset_name):
             input_path = Path(input_path_str)
             print("=== PROCESSING " + dataset_name.upper() + " DATASET ===")
@@ -136,11 +146,16 @@ implementation:
                 print("File size: " + str(file_size) + " bytes (" + str(round(size_mb, 1)) + " MB)")
                 print("File suffix: " + str(input_path.suffix))
                 
-                # First try to load as pickle
-                pickle_data = load_pickled_dataset(input_path)
-                if pickle_data is not None:
-                    print("Successfully loaded as pickle file")
-                    return pickle_data
+                # Check if it's a pickle file first
+                if is_pickle_file(input_path):
+                    print("Detected pickle file format")
+                    pickle_data = load_pickled_dataset(input_path)
+                    if pickle_data is not None:
+                        print("Successfully loaded as pickle file")
+                        return pickle_data
+                    else:
+                        print("Failed to load pickle file")
+                        return None
                 
                 # If not pickle, try to extract as archive
                 extract_dir = input_path.parent / (dataset_name + "_extracted")
@@ -156,7 +171,7 @@ implementation:
                         print("Using extraction directory: " + str(final_path))
                     return final_path
                 else:
-                    print("Failed to extract archive and not a pickle file")
+                    print("Failed to extract archive")
                     return None
             elif input_path.is_dir():
                 print("Input is directory: " + str(input_path))
@@ -171,6 +186,8 @@ implementation:
                 self.samples = []
                 self.category_to_idx = category_to_idx
                 
+                print("Dataset input type: " + str(type(dataset_input)))
+                
                 # Handle different input types
                 if isinstance(dataset_input, dict):
                     # This is pickled dataset data
@@ -182,7 +199,9 @@ implementation:
                     print("Processing directory dataset: " + str(split_root))
                     self._process_directory_data(split_root)
                 else:
-                    raise RuntimeError("Unsupported dataset input type: " + str(type(dataset_input)))
+                    print("Unsupported dataset input type, trying as directory: " + str(dataset_input))
+                    split_root = Path(str(dataset_input))
+                    self._process_directory_data(split_root)
                 
                 if len(self.samples) == 0:
                     expected_cats = list(category_to_idx.keys())
@@ -190,7 +209,7 @@ implementation:
 
             def _process_pickle_data(self, pickle_data):
                 """Process dataset from pickle data"""
-                print("Pickle data structure: " + str(pickle_data.keys()))
+                print("Pickle data structure: " + str(list(pickle_data.keys())))
                 
                 # Check if data_path exists and points to actual data
                 if 'data_path' in pickle_data:
