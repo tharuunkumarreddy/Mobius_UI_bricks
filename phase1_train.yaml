@@ -8,9 +8,9 @@ inputs:
   - {name: phase1_model_meta, type: String, description: "Model metadata (phase1_model_meta.json)"}
 
 outputs:
-  - {name: phase1_resnet50_best, type: Model, path: "/tmp/outputs/phase1_resnet50_best/data", description: "Best model checkpoint (phase1_resnet50_best.pt)"}
-  - {name: phase1_label_maps, type: Dataset, path: "/tmp/outputs/phase1_label_maps/data", description: "Category to index and index to category mapping (phase1_label_maps.json)"}
-  - {name: phase1_train_log, type: Dataset, path: "/tmp/outputs/phase1_train_log/data", description: "Training log with best validation accuracy (phase1_train_log.json)"}
+  - {name: phase1_resnet50_best, type: Model, description: "Best model checkpoint (phase1_resnet50_best.pt)"}
+  - {name: phase1_label_maps, type: Dataset, description: "Category to index and index to category mapping (phase1_label_maps.json)"}
+  - {name: phase1_train_log, type: Dataset, description: "Training log with best validation accuracy (phase1_train_log.json)"}
 
 implementation:
   container:
@@ -207,16 +207,6 @@ implementation:
       - {inputPath: test_data}
       - {inputPath: phase1_model_init}
       - {inputPath: phase1_model_meta}
-      - {outputPath: phase1_output_dir}  # Define an output directory
-      - --epochs
-      - "10"
-      - --batch_size
-      - "32"
-      - --lr
-      - "3e-4"
-      - --weight_decay
-      - "1e-4"
-      - --num_workers
-      - "2"
-      - --seed
-      - "42"
+      - {outputPath: phase1_resnet50_best}
+      - {outputPath: phase1_label_maps}
+      - {outputPath: phase1_train_log}
