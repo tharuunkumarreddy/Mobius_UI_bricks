@@ -85,17 +85,17 @@ implementation:
             return files
 
         def is_pickle_file(file_path):
-            """Check if file is a pickle file by checking the magic bytes"""
+            # Check if file is a pickle file by reading magic bytes
             try:
                 with open(file_path, 'rb') as f:
                     magic = f.read(2)
-                    # Pickle files typically start with specific magic bytes
+                    # Pickle files start with specific magic bytes
                     return magic in [b'\x80\x02', b'\x80\x03', b'\x80\x04', b'\x80\x05']
             except:
                 return False
 
         def load_pickled_dataset(file_path):
-            """Load dataset from pickle file"""
+            # Load dataset from pickle file
             try:
                 print("Attempting to load pickle file: " + str(file_path))
                 with open(file_path, 'rb') as f:
