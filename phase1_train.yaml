@@ -26,9 +26,9 @@ implementation:
         python -m pip install --no-cache-dir torch torchvision pillow
 
         # ---- Set environment variables for the script ----
-        export TRAIN_DATA_PATH="$1"
-        export VAL_DATA_PATH="$2"
-        export TEST_DATA_PATH="$3"
+        export TRAIN_DATA_PATH="$1/train"
+        export VAL_DATA_PATH="$2/val"
+        export TEST_DATA_PATH="$3/test"
         export MODEL_INIT_PATH="$4"
         export MODEL_META_PATH="$5"
         export OUTPUT_DIR="$6"
