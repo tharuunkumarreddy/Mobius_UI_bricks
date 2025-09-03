@@ -25,13 +25,11 @@ implementation:
         apt-get update -y && apt-get install -y python3-pip
         python -m pip install --no-cache-dir torch torchvision pillow
 
-        # ---- Set environment variables for the script ----
-        export TRAIN_DATA_PATH="$1/train"
-        export VAL_DATA_PATH="$2/val"
-        export TEST_DATA_PATH="$3/test"
-        export MODEL_INIT_PATH="$4"
-        export MODEL_META_PATH="$5"
-        export OUTPUT_DIR="$6"
+        # ---- Create dataset root directory structure ----
+        mkdir -p /tmp/dataset_root
+        ln -sf "$1" /tmp/dataset_root/train
+        ln -sf "$2" /tmp/dataset_root/val
+        ln -sf "$3" /tmp/dataset_root/test
 
         # ---- Python script for training ----
         cat > /tmp/phase1_train.py <<'PY'
@@ -200,7 +198,12 @@ implementation:
             main()
         PY
 
-        python /tmp/phase1_train.py
+        # ---- Run the training script with proper arguments ----
+        python /tmp/phase1_train.py \
+          --dataset_root /tmp/dataset_root \
+          --model_init "$4" \
+          --model_meta "$5" \
+          --out_dir "$6"
     args:
       - {inputPath: train_data}
       - {inputPath: val_data}
