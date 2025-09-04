@@ -49,15 +49,27 @@ implementation:
         echo "Unzipping $ZIP_PATH ..."
         unzip -q "$ZIP_PATH" -d "$WORKDIR"
 
-        # Detect dataset root
-        if SRC_DIR="$(find "$WORKDIR" -type d -name 'Classification_Dataset' -print -quit)"; then
-          :
+        # Updated: Detect dataset root - look for the extracted folder directly
+        # The dataset now has categories directly under the main folder
+        if SRC_DIR="$(find "$WORKDIR" -type d -name 'classification-dataset-4' -print -quit)"; then
+          echo "Found classification-dataset-4 directory: $SRC_DIR"
         else
+          # Fallback: look for any directory that contains subdirectories (categories)
           SRC_DIR="$(find "$WORKDIR" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
+          if [ -n "$SRC_DIR" ]; then
+            # Check if this directory contains category subdirectories
+            if [ "$(find "$SRC_DIR" -mindepth 1 -maxdepth 1 -type d | wc -l)" -gt 0 ]; then
+              echo "Using directory with subdirectories: $SRC_DIR"
+            else
+              echo "ERROR: Found directory but it doesn't contain subdirectories." >&2
+              exit 1
+            fi
+          fi
         fi
 
         if [ -z "$SRC_DIR" ] || [ ! -d "$SRC_DIR" ]; then
           echo "ERROR: Could not locate extracted dataset directory under $WORKDIR." >&2
+          echo "Available directories:" >&2
           find "$WORKDIR" -maxdepth 2 -type d -print >&2 || true
           exit 1
         fi
@@ -111,17 +123,27 @@ implementation:
                 shutil.copy2(src, dst_dir / src.name)
 
         def is_category_dir(d: Path):
+            """Check if directory contains component subdirectories"""
             return d.is_dir() and any(child.is_dir() for child in d.iterdir())
 
         def get_categories(root: Path):
-            cats = [d for d in root.iterdir() if is_category_dir(d)]
-            if not cats:
-                candidates = [d for d in root.iterdir() if d.is_dir()]
-                for d in candidates:
-                    deeper = [x for x in d.iterdir() if is_category_dir(x)]
-                    if deeper:
-                        return deeper
-            return cats
+            """Get category directories from the root path"""
+            print(f"[DEBUG] Looking for categories in: {root}")
+            
+            # List all directories in root
+            all_dirs = [d for d in root.iterdir() if d.is_dir()]
+            print(f"[DEBUG] Found {len(all_dirs)} directories in root:")
+            for d in all_dirs:
+                print(f"  - {d.name}")
+            
+            # Filter directories that contain component subdirectories
+            category_dirs = [d for d in all_dirs if is_category_dir(d)]
+            print(f"[DEBUG] Found {len(category_dirs)} category directories:")
+            for d in category_dirs:
+                components = [c for c in d.iterdir() if c.is_dir()]
+                print(f"  - {d.name} ({len(components)} components)")
+            
+            return category_dirs
 
         def safe_split(n, tr, va, te):
             base_tr = floor(n * tr)
@@ -148,7 +170,21 @@ implementation:
 
         # Source dataset root from env (set by shell after unzip)
         src_root_env = os.environ.get("SRC_DIR", "").strip()
-        src_root = Path(src_root_env) if src_root_env else Path("/ui_components_temp/Classification_Dataset")
+        if not src_root_env:
+            # Fallback to common locations
+            potential_paths = [
+                Path("/ui_components_temp/classification-dataset-4"),
+                Path("/ui_components_temp")
+            ]
+            for p in potential_paths:
+                if p.exists() and any(d.is_dir() for d in p.iterdir()):
+                    src_root = p
+                    break
+            else:
+                raise SystemExit("Could not find dataset root directory")
+        else:
+            src_root = Path(src_root_env)
+            
         print(f"[INFO] Using source root: {src_root}")
 
         out_root = Path("/tmp/processed_data")
@@ -160,17 +196,20 @@ implementation:
         ensure_dirs(out_root)
 
         if not src_root.exists():
-            base = Path("/ui_components_temp")
-            if base.exists():
-                for p in base.iterdir():
-                    print(" -", p, file=sys.stderr)
-            raise SystemExit(f"No category folders found under: {src_root}")
+            raise SystemExit(f"Source root does not exist: {src_root}")
 
         categories = get_categories(src_root)
         if not categories:
+            print(f"[ERROR] No category folders found under: {src_root}")
+            print("[ERROR] Directory contents:")
+            if src_root.exists():
+                for p in src_root.iterdir():
+                    print(f"  - {p.name} ({'directory' if p.is_dir() else 'file'})")
             raise SystemExit(f"No category folders found under: {src_root}")
 
+        total_images = 0
         for cat in categories:
+            print(f"[INFO] Processing category: {cat.name}")
             components = [d for d in cat.iterdir() if d.is_dir()]
             if not components:
                 print(f"[WARN] No component folders in category: {cat.name}")
@@ -181,6 +220,9 @@ implementation:
                 if not imgs:
                     print(f"[WARN] No images in: {cat.name}/{comp.name}")
                     continue
+
+                print(f"[INFO] Processing {cat.name}/{comp.name}: {len(imgs)} images")
+                total_images += len(imgs)
 
                 random.shuffle(imgs)
                 n = len(imgs)
@@ -197,6 +239,9 @@ implementation:
                 for f in test_files:
                     transfer(f, out_root / "test" / cat.name / comp.name, move=move_files)
 
+        print(f"[INFO] Total images processed: {total_images}")
+
+        # Create manifest
         rows = []
         for split in ["train", "val", "test"]:
             split_dir = out_root / split
@@ -206,45 +251,62 @@ implementation:
                 for comp in sorted([c for c in cat.iterdir() if c.is_dir()]):
                     for img in comp.iterdir():
                         if img.suffix.lower() in ALLOWED_EXTS:
-                            rows.append({"path": str(img), "split": split, "category": cat.name, "component": comp.name})
+                            rows.append({
+                                "path": str(img), 
+                                "split": split, 
+                                "category": cat.name, 
+                                "component": comp.name
+                            })
 
         manifest = pd.DataFrame(rows)
         manifest_path = out_root / "dataset_manifest.csv"
         manifest.to_csv(manifest_path, index=False)
+        print(f"[INFO] Created manifest with {len(manifest)} entries")
 
+        # Create categories list
         cats = sorted([d.name for d in (out_root / "train").iterdir() if d.is_dir()]) if (out_root / "train").exists() else []
         categories_path = out_root / "categories.json"
         categories_path.write_text(json.dumps(cats, indent=2))
+        print(f"[INFO] Found {len(cats)} categories: {cats}")
 
+        # Create components mapping
         comp_map = discover_components(out_root / "train")
         components_path = out_root / "components_mapping.json"
         components_path.write_text(json.dumps(comp_map, indent=2))
+        print(f"[INFO] Created components mapping for {len(comp_map)} categories")
 
         def _makedirs_for(path_str: str) -> Path:
             p = Path(path_str)
             p.parent.mkdir(parents=True, exist_ok=True)
             return p
 
+        # Save pickle files for KFP outputs
         with open(_makedirs_for(train_data_path), "wb") as f:
-            pickle.dump({"data_path": str(out_root / "train"),
-                         "manifest_path": str(manifest_path),
-                         "categories": cats,
-                         "components_mapping": comp_map,
-                         "split": "train"}, f)
+            pickle.dump({
+                "data_path": str(out_root / "train"),
+                "manifest_path": str(manifest_path),
+                "categories": cats,
+                "components_mapping": comp_map,
+                "split": "train"
+            }, f)
 
         with open(_makedirs_for(test_data_path), "wb") as f:
-            pickle.dump({"data_path": str(out_root / "test"),
-                         "manifest_path": str(manifest_path),
-                         "categories": cats,
-                         "components_mapping": comp_map,
-                         "split": "test"}, f)
+            pickle.dump({
+                "data_path": str(out_root / "test"),
+                "manifest_path": str(manifest_path),
+                "categories": cats,
+                "components_mapping": comp_map,
+                "split": "test"
+            }, f)
 
         with open(_makedirs_for(val_data_path), "wb") as f:
-            pickle.dump({"data_path": str(out_root / "val"),
-                         "manifest_path": str(manifest_path),
-                         "categories": cats,
-                         "components_mapping": comp_map,
-                         "split": "val"}, f)
+            pickle.dump({
+                "data_path": str(out_root / "val"),
+                "manifest_path": str(manifest_path),
+                "categories": cats,
+                "components_mapping": comp_map,
+                "split": "val"
+            }, f)
 
         with open(_makedirs_for(dataset_manifest_path), "wb") as f:
             pickle.dump(manifest, f)
@@ -255,11 +317,11 @@ implementation:
         with open(_makedirs_for(components_mapping_path), "wb") as f:
             pickle.dump(comp_map, f)
 
-        print("Output tree root:", out_root)
-        print("Manifest saved to:", manifest_path)
-        print("Categories saved to:", categories_path)
-        print("Components mapping saved to:", components_path)
-        print("Successfully processed and saved UI Components dataset.")
+        print(f"[INFO] Output tree root: {out_root}")
+        print(f"[INFO] Manifest saved to: {manifest_path}")
+        print(f"[INFO] Categories saved to: {categories_path}")
+        print(f"[INFO] Components mapping saved to: {components_path}")
+        print("[SUCCESS] Successfully processed and saved UI Components dataset.")
         PY
 
         # Execute the Python script (no arguments needed now)
