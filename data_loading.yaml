@@ -127,7 +127,7 @@ implementation:
             return d.is_dir() and any(child.is_dir() for child in d.iterdir())
 
         def get_categories(root: Path):
-            """Get category directories from the root path"""
+            # Get category directories from the root path
             print(f"[DEBUG] Looking for categories in: {root}")
             
             # List all directories in root
