@@ -23,7 +23,7 @@ implementation:
 
         # ---- Hardcode Kaggle credentials (use secrets in prod) ----
         mkdir -p /root/.kaggle
-        cat > /root/.kaggle/kaggle.json <<'EOF'
+        cat > /root/.kaggle/kaggle.json <<EOF
         {
           "username": "chtharunkumarreddy09",
           "key": "1f063391436fcaa34c9d57c545cbd731"
@@ -88,8 +88,7 @@ implementation:
         export CATEGORIES_JSON_PATH="$9"
         export COMPONENTS_MAPPING_PATH="${11}"
 
-        cat > /tmp/process_dataset.py <<'PY'
-        #!/usr/bin/env python3
+        cat > /tmp/process_dataset.py <<PYEND
         import json, random, shutil, os, pickle, sys
         from pathlib import Path
         from math import floor
@@ -123,7 +122,7 @@ implementation:
                 shutil.copy2(src, dst_dir / src.name)
 
         def is_category_dir(d: Path):
-            """Check if directory contains component subdirectories"""
+            # Check if directory contains component subdirectories
             return d.is_dir() and any(child.is_dir() for child in d.iterdir())
 
         def get_categories(root: Path):
@@ -322,7 +321,7 @@ implementation:
         print(f"[INFO] Categories saved to: {categories_path}")
         print(f"[INFO] Components mapping saved to: {components_path}")
         print("[SUCCESS] Successfully processed and saved UI Components dataset.")
-        PY
+        PYEND
 
         # Execute the Python script (no arguments needed now)
         python /tmp/process_dataset.py
