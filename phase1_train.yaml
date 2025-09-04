@@ -1,14 +1,14 @@
 name: phase1_train_model
-description: Trains a ResNet50 model using the provided datasets and initial model weights.
+description: Trains the Phase 1 ResNet50 classifier using data from the loading component and the model definition.
 inputs:
-  - {name: train_data, type: Dataset, description: "Pickled train dataset metadata from the data loading component"}
-  - {name: val_data, type: Dataset, description: "Pickled validation dataset metadata from the data loading component"}
-  - {name: model_init, type: Model, description: "Path to the initial model weights (.pt file)"}
-  - {name: model_meta, type: String, description: "Path to the model metadata (.json file)"}
+  - {name: train_data, type: Dataset, description: "Pickled dictionary containing the path to the training dataset."}
+  - {name: val_data, type: Dataset, description: "Pickled dictionary containing the path to the validation dataset."}
+  - {name: model_init, type: Model, description: "The initial model weights (.pt file) from the model definition step."}
+  - {name: model_meta, type: String, description: "The model metadata (JSON file) from the model definition step."}
 outputs:
-  - {name: best_model, type: Model, description: "The best trained model weights saved in .pt format"}
-  - {name: label_maps, type: Dataset, description: "JSON file mapping class indices to class names"}
-  - {name: train_log, type: Dataset, description: "JSON file containing training and validation logs"}
+  - {name: best_model, type: Model, description: "The best trained model weights (.pt file)."}
+  - {name: label_maps, type: Dataset, description: "A JSON file mapping class indices to category names."}
+  - {name: train_log, type: Dataset, description: "A JSON file containing the final training log, including best validation accuracy."}
 implementation:
   container:
     image: python:3.9
@@ -17,8 +17,8 @@ implementation:
       - -c
       - |
         set -e
-        # Install necessary Python libraries, specifically PyTorch for CPU
-        pip install torch torchvision pandas scikit-learn --index-url https://download.pytorch.org/whl/cpu
+        # Install required Python libraries
+        pip install numpy torch torchvision --index-url https://download.pytorch.org/whl/cpu
         
         # Execute the main Python script
         exec "$0" "$@"
@@ -26,188 +26,228 @@ implementation:
       - -u
       - -c
       - |
+        #!/usr/bin/env python3
         import argparse
         import json
-        import os
-        import pickle
+        import math
+        import random
         import time
+        import pickle
         from pathlib import Path
 
+        import numpy as np
         import torch
         import torch.nn as nn
-        import torch.optim as optim
+        import torch.backends.cudnn as cudnn
+        from torch.utils.data import Dataset, DataLoader
         from torchvision import transforms
-        from torchvision.datasets import ImageFolder
-        from torch.utils.data import DataLoader
-        from torchvision.models import resnet50
+        from torchvision.models import resnet50, ResNet50_Weights
+        from PIL import Image
+
+        # --- Utility Functions and Classes from your script ---
+
+        IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+        def set_seed(seed=42):
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+            cudnn.deterministic = False
+            cudnn.benchmark = True
+
+        def list_images_under_category(category_dir: Path):
+            files = []
+            for comp_dir in sorted(category_dir.iterdir()):
+                if comp_dir.is_dir():
+                    for f in sorted(comp_dir.iterdir()):
+                        if f.is_file() and f.suffix.lower() in IMG_EXTS:
+                            files.append(f)
+            return files
+
+        class UICategoryDataset(Dataset):
+            def __init__(self, split_root: Path, category_to_idx: dict, transform=None):
+                self.transform = transform
+                self.samples = []
+                self.category_to_idx = category_to_idx
+                for cat in sorted(category_to_idx.keys()):
+                    cat_dir = split_root / cat
+                    if not cat_dir.is_dir(): 
+                        print(f"Warning: Category directory not found: {cat_dir}")
+                        continue
+                    for img_path in list_images_under_category(cat_dir):
+                        self.samples.append((img_path, category_to_idx[cat]))
+                if len(self.samples) == 0:
+                    raise RuntimeError(f"FATAL: No images found under the provided path: {split_root}")
+
+            def __len__(self): return len(self.samples)
+
+            def __getitem__(self, idx):
+                path, y = self.samples[idx]
+                try:
+                    img = Image.open(path).convert("RGB")
+                    if self.transform: img = self.transform(img)
+                    return img, y
+                except Exception as e:
+                    print(f"Error loading image {path}: {e}")
+                    # Return a placeholder tensor if an image is corrupt
+                    return torch.zeros((3, 224, 224)), -1
+
+
+        def accuracy(outputs, targets):
+            preds = outputs.argmax(dim=1)
+            return (preds == targets).float().mean().item()
+
+        def evaluate(model, loader, device, criterion):
+            model.eval()
+            running_loss, running_acc, n = 0.0, 0.0, 0
+            with torch.no_grad():
+                for x, y in loader:
+                    # Skip bad batches from corrupt images
+                    if -1 in y: continue
+                    x, y = x.to(device), y.to(device)
+                    logits = model(x)
+                    loss = criterion(logits, y)
+                    bs = y.size(0)
+                    running_loss += loss.item() * bs
+                    running_acc  += accuracy(logits, y) * bs
+                    n += bs
+            return running_loss / max(1, n), running_acc / max(1, n)
 
         def main():
-            # 1. --- Argument Parsing ---
-            # This section correctly defines all the command-line arguments
-            # that will receive the paths to input and output artifacts from Kubeflow.
-            parser = argparse.ArgumentParser(description="PyTorch Model Training")
-            parser.add_argument('--train_data', type=str, required=True, help='Path to the pickled training data info')
-            parser.add_argument('--val_data', type=str, required=True, help='Path to the pickled validation data info')
-            parser.add_argument('--model_init', type=str, required=True, help='Path to initial model weights (.pt)')
-            parser.add_argument('--model_meta', type=str, required=True, help='Path to model metadata (.json)')
-            parser.add_argument('--best_model', type=str, required=True, help='Path to save the best model weights')
-            parser.add_argument('--label_maps', type=str, required=True, help='Path to save the label maps JSON')
-            parser.add_argument('--train_log', type=str, required=True, help='Path to save the training log JSON')
+            # 1. --- Argument Parser for Kubeflow ---
+            # This parser is designed to accept the input/output paths from Kubeflow.
+            parser = argparse.ArgumentParser()
+            parser.add_argument('--train_data', type=str, required=True, help='Path to pickled train data info.')
+            parser.add_argument('--val_data', type=str, required=True, help='Path to pickled validation data info.')
+            parser.add_argument('--model_init', type=str, required=True, help='Path to phase1_model_init.pt.')
+            parser.add_argument('--model_meta', type=str, required=True, help='Path to phase1_model_meta.json.')
+            
+            parser.add_argument('--best_model', type=str, required=True, help='Output path for the best model .pt file.')
+            parser.add_argument('--label_maps', type=str, required=True, help='Output path for the label maps .json file.')
+            parser.add_argument('--train_log', type=str, required=True, help='Output path for the training log .json file.')
             
             # --- Hyperparameters ---
-            parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs')
-            parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
-            parser.add_argument('--learning_rate', type=float, default=0.001, help='Learning rate for the optimizer')
+            parser.add_argument('--epochs', type=int, default=10)
+            parser.add_argument('--batch_size', type=int, default=32)
+            parser.add_argument('--lr', type=float, default=3e-4)
+            parser.add_argument('--weight_decay', type=float, default=1e-4)
+            parser.add_argument('--num_workers', type=int, default=2)
+            parser.add_argument('--seed', type=int, default=42)
             args = parser.parse_args()
 
-            # 2. --- Load Inputs ---
-            # Load the metadata and initial model from the paths provided by the arguments.
-            print("Loading inputs...")
+            # --- Setup and Input Loading ---
+            set_seed(args.seed)
+            for path in [args.best_model, args.label_maps, args.train_log]:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+            
+            # Unpickle dataset info to get the actual data paths
             with open(args.train_data, 'rb') as f:
                 train_info = pickle.load(f)
+            train_dir = Path(train_info['data_path'])
+            
             with open(args.val_data, 'rb') as f:
                 val_info = pickle.load(f)
-            with open(args.model_meta, 'r') as f:
-                meta = json.load(f)
-
-            train_dir = Path(train_info['data_path'])
             val_dir = Path(val_info['data_path'])
+
+            print(f"Training data path: {train_dir}")
+            print(f"Validation data path: {val_dir}")
+
+            meta = json.loads(Path(args.model_meta).read_text())
+            image_size = meta["image_size"]
+            mean, std = meta["mean"], meta["std"]
+            categories = meta["categories"]
+            category_to_idx = {c:i for i,c in enumerate(categories)}
+            idx_to_category = {i:c for c,i in category_to_idx.items()}
+
+            # --- Datasets and Dataloaders ---
+            train_tfms = transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)),
+                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.15, hue=0.02),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ])
+            eval_tfms = transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ])
+
+            device = torch.device("cpu") # Forcing CPU as per install, change to "cuda" if GPU is available
+            train_ds = UICategoryDataset(train_dir, category_to_idx, transform=train_tfms)
+            val_ds   = UICategoryDataset(val_dir, category_to_idx, transform=eval_tfms)
+            train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
+            val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+
+            # --- Model, Loss, and Optimizer ---
+            # Rebuild the same architecture used in model_def
+            model = resnet50(weights=None)
+            model.fc = nn.Sequential(nn.Dropout(p=0.2), nn.Linear(model.fc.in_features, len(categories)))
+            model.load_state_dict(torch.load(args.model_init, map_location="cpu"), strict=True)
+            model.to(device)
             
-            num_classes = meta['num_classes']
-            image_size = meta['image_size']
-            mean = meta['mean']
-            std = meta['std']
-            categories = meta['categories']
-            
-            print(f"Number of classes: {num_classes}")
-            print(f"Training directory: {train_dir}")
-            print(f"Validation directory: {val_dir}")
+            criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
+            optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-            # 3. --- Prepare Datasets and DataLoaders ---
-            # Define image transformations using the mean and std from the model_meta file.
-            data_transforms = {
-                'train': transforms.Compose([
-                    transforms.RandomResizedCrop(image_size),
-                    transforms.RandomHorizontalFlip(),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean, std)
-                ]),
-                'val': transforms.Compose([
-                    transforms.Resize(image_size + 32),
-                    transforms.CenterCrop(image_size),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean, std)
-                ]),
-            }
-
-            # Create ImageFolder datasets and DataLoaders
-            image_datasets = {
-                'train': ImageFolder(train_dir, data_transforms['train']),
-                'val': ImageFolder(val_dir, data_transforms['val'])
-            }
-            dataloaders = {x: DataLoader(image_datasets[x], batch_size=args.batch_size, shuffle=True, num_workers=2) for x in ['train', 'val']}
-            dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'val']}
-            class_names = image_datasets['train'].classes
-            
-            # Verify class names match
-            assert class_names == categories, "Class name mismatch between dataset and metadata!"
-            print(f"Discovered classes: {class_names}")
-
-            # 4. --- Initialize Model, Optimizer, and Loss Function ---
-            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-            print(f"Using device: {device}")
-
-            # Re-create the exact same model structure as in phase1_model_def
-            model = resnet50(weights=None) # No pretrained weights, we will load our own
-            model.fc = nn.Sequential(
-                nn.Dropout(p=0.2),
-                nn.Linear(model.fc.in_features, num_classes)
-            )
-            
-            # Load the initial weights from the previous component
-            model.load_state_dict(torch.load(args.model_init, map_location=device))
-            model = model.to(device)
-
-            criterion = nn.CrossEntropyLoss()
-            optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-
-            # 5. --- Training Loop ---
-            since = time.time()
-            best_model_wts = model.state_dict()
-            best_acc = 0.0
-            train_log_history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
-
-            for epoch in range(args.epochs):
-                print(f'Epoch {epoch}/{args.epochs - 1}')
-                print('-' * 10)
-
-                for phase in ['train', 'val']:
-                    if phase == 'train':
-                        model.train()
-                    else:
-                        model.eval()
-
-                    running_loss = 0.0
-                    running_corrects = 0
-
-                    for inputs, labels in dataloaders[phase]:
-                        inputs = inputs.to(device)
-                        labels = labels.to(device)
-
-                        optimizer.zero_grad()
-
-                        with torch.set_grad_enabled(phase == 'train'):
-                            outputs = model(inputs)
-                            _, preds = torch.max(outputs, 1)
-                            loss = criterion(outputs, labels)
-
-                            if phase == 'train':
-                                loss.backward()
-                                optimizer.step()
-
-                        running_loss += loss.item() * inputs.size(0)
-                        running_corrects += torch.sum(preds == labels.data)
-
-                    epoch_loss = running_loss / dataset_sizes[phase]
-                    epoch_acc = running_corrects.double() / dataset_sizes[phase]
+            # --- Training Loop ---
+            best_val_acc = 0.0
+            for epoch in range(1, args.epochs + 1):
+                model.train()
+                epoch_loss, epoch_acc, seen = 0.0, 0.0, 0
+                t0 = time.time()
+                for x, y in train_loader:
+                    if -1 in y: continue # Skip bad batches
+                    x, y = x.to(device), y.to(device)
+                    optimizer.zero_grad(set_to_none=True)
+                    logits = model(x)
+                    loss = criterion(logits, y)
+                    loss.backward()
+                    optimizer.step()
                     
-                    train_log_history[f'{phase}_loss'].append(epoch_loss)
-                    train_log_history[f'{phase}_acc'].append(epoch_acc.item())
+                    bs = y.size(0)
+                    epoch_loss += loss.item() * bs
+                    epoch_acc  += accuracy(logits, y) * bs
+                    seen += bs
+                
+                train_loss = epoch_loss / max(1, seen)
+                train_acc  = epoch_acc  / max(1, seen)
+                val_loss, val_acc = evaluate(model, val_loader, device, criterion)
+                dt = time.time() - t0
+                print(f"Epoch {epoch:02d}/{args.epochs} | {dt:.1f}s | Train Loss {train_loss:.4f} Acc {train_acc:.3f} | Val Loss {val_loss:.4f} Acc {val_acc:.3f}")
 
-                    print(f'{phase} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    # Save checkpoint directly to the output path provided by Kubeflow
+                    torch.save({
+                        "model_state": model.state_dict(),
+                        "category_to_idx": category_to_idx,
+                        "idx_to_category": idx_to_category,
+                        "image_size": image_size,
+                    }, args.best_model)
+                    print(f"✓ Saved new best model to {args.best_model} (val_acc={val_acc:.3f})")
 
-                    if phase == 'val' and epoch_acc > best_acc:
-                        best_acc = epoch_acc
-                        best_model_wts = model.state_dict()
-                        print(f"New best validation accuracy: {best_acc:.4f}, saving model.")
-                        # Save the best model weights to the path specified by Kubeflow
-                        torch.save(best_model_wts, args.best_model)
-
-
-            time_elapsed = time.time() - since
-            print(f'Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s')
-            print(f'Best val Acc: {best_acc:4f}')
-
-            # 6. --- Save Outputs ---
-            print("Saving final artifacts...")
+            # --- Save Final Output Artifacts ---
+            print(f"Finalizing outputs. Best validation accuracy: {best_val_acc:.3f}")
             
-            # The best model is already saved in the loop. This is just a confirmation.
-            print(f"Best model saved to {args.best_model}")
-
-            # Create and save label maps
-            label_map_dict = {i: name for i, name in enumerate(class_names)}
-            with open(args.label_maps, 'w') as f:
-                json.dump(label_map_dict, f, indent=2)
+            # Save label maps to the output path provided by Kubeflow
+            Path(args.label_maps).write_text(json.dumps({
+                "category_to_idx": category_to_idx, "idx_to_category": idx_to_category
+            }, indent=2))
             print(f"Label maps saved to {args.label_maps}")
 
-            # Save training log
-            with open(args.train_log, 'w') as f:
-                json.dump(train_log_history, f, indent=2)
+            # Save training log to the output path provided by Kubeflow
+            Path(args.train_log).write_text(json.dumps({
+                "best_val_acc": best_val_acc
+            }, indent=2))
             print(f"Training log saved to {args.train_log}")
 
-        if __name__ == '__main__':
+        if __name__ == "__main__":
             main()
     args:
+      # Map the component inputs to the script's arguments
       - --train_data
       - {inputPath: train_data}
       - --val_data
@@ -216,9 +256,11 @@ implementation:
       - {inputPath: model_init}
       - --model_meta
       - {inputPath: model_meta}
+      # Map the component outputs to the script's arguments
       - --best_model
       - {outputPath: best_model}
       - --label_maps
       - {outputPath: label_maps}
       - --train_log
       - {outputPath: train_log}
+
