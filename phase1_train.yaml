@@ -16,12 +16,16 @@ implementation:
       - sh
       - -c
       - |
-        set -ex
+        set -e
         # Install required Python libraries
-        pip install numpy torch torchvision pillow --index-url https://download.pytorch.org/whl/cpu 2>&1
+        pip install --no-cache-dir numpy torch torchvision pillow --index-url https://download.pytorch.org/whl/cpu
         
-        # Write the Python script to a file
-        cat > /tmp/train_script.py << 'EOF'
+        # Execute the main Python script
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
         #!/usr/bin/env python3
         import argparse
         import json
@@ -29,9 +33,9 @@ implementation:
         import random
         import time
         import pickle
-        import traceback
         from pathlib import Path
-        
+        import sys
+
         import numpy as np
         import torch
         import torch.nn as nn
@@ -43,6 +47,7 @@ implementation:
 
         IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
+        # --- Seed Setup ---
         def set_seed(seed=42):
             random.seed(seed)
             np.random.seed(seed)
@@ -52,6 +57,7 @@ implementation:
             cudnn.deterministic = False
             cudnn.benchmark = True
 
+        # --- Dataset Utils ---
         def list_images_under_category(category_dir: Path):
             files = []
             for comp_dir in sorted(category_dir.iterdir()):
@@ -68,26 +74,30 @@ implementation:
                 self.category_to_idx = category_to_idx
                 for cat in sorted(category_to_idx.keys()):
                     cat_dir = split_root / cat
-                    if not cat_dir.is_dir(): 
+                    if not cat_dir.is_dir():
                         print(f"Warning: Category directory not found: {cat_dir}")
                         continue
                     for img_path in list_images_under_category(cat_dir):
                         self.samples.append((img_path, category_to_idx[cat]))
                 if len(self.samples) == 0:
-                    raise RuntimeError(f"FATAL: No images found under the provided path: {split_root}")
+                    raise RuntimeError(f"No images found under the provided path: {split_root}")
 
-            def __len__(self): return len(self.samples)
+            def __len__(self):
+                return len(self.samples)
 
             def __getitem__(self, idx):
                 path, y = self.samples[idx]
                 try:
                     img = Image.open(path).convert("RGB")
-                    if self.transform: img = self.transform(img)
+                    if self.transform:
+                        img = self.transform(img)
                     return img, y
                 except Exception as e:
-                    print(f"Error loading image {path}: {e}")
+                    print(f"Error loading image {path}: {e}", file=sys.stderr)
+                    # Return a placeholder tensor for corrupt images
                     return torch.zeros((3, 224, 224)), -1
 
+        # --- Metrics ---
         def accuracy(outputs, targets):
             preds = outputs.argmax(dim=1)
             return (preds == targets).float().mean().item()
@@ -97,16 +107,20 @@ implementation:
             running_loss, running_acc, n = 0.0, 0.0, 0
             with torch.no_grad():
                 for x, y in loader:
-                    if -1 in y: continue
-                    x, y = x.to(device), y.to(device)
+                    # Skip bad batches from corrupt images
+                    mask = y != -1
+                    if mask.sum() == 0:
+                        continue
+                    x, y = x[mask].to(device), y[mask].to(device)
                     logits = model(x)
                     loss = criterion(logits, y)
                     bs = y.size(0)
                     running_loss += loss.item() * bs
-                    running_acc  += accuracy(logits, y) * bs
+                    running_acc += accuracy(logits, y) * bs
                     n += bs
             return running_loss / max(1, n), running_acc / max(1, n)
 
+        # --- Main Training Function ---
         def main():
             parser = argparse.ArgumentParser()
             parser.add_argument('--train_data', type=str, required=True)
@@ -124,134 +138,114 @@ implementation:
             parser.add_argument('--seed', type=int, default=42)
             args = parser.parse_args()
 
-            try:
-                set_seed(args.seed)
-                for path in [args.best_model, args.label_maps, args.train_log]:
-                    Path(path).parent.mkdir(parents=True, exist_ok=True)
-                
-                # Load data paths
-                with open(args.train_data, 'rb') as f:
-                    train_info = pickle.load(f)
-                train_dir = Path(train_info['data_path'])
-                
-                with open(args.val_data, 'rb') as f:
-                    val_info = pickle.load(f)
-                val_dir = Path(val_info['data_path'])
+            # --- Setup ---
+            set_seed(args.seed)
+            for path in [args.best_model, args.label_maps, args.train_log]:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-                print(f"Training data path: {train_dir}")
-                print(f"Validation data path: {val_dir}")
+            with open(args.train_data, 'rb') as f:
+                train_info = pickle.load(f)
+            with open(args.val_data, 'rb') as f:
+                val_info = pickle.load(f)
 
-                # Load model metadata
-                meta = json.loads(Path(args.model_meta).read_text())
-                image_size = meta["image_size"]
-                mean, std = meta["mean"], meta["std"]
-                categories = meta["categories"]
-                category_to_idx = {c:i for i,c in enumerate(categories)}
-                idx_to_category = {i:c for c,i in category_to_idx.items()}
+            train_dir = Path(train_info['data_path'])
+            val_dir = Path(val_info['data_path'])
 
-                # Data loading
-                train_tfms = transforms.Compose([
-                    transforms.Resize((image_size, image_size)),
-                    transforms.RandomHorizontalFlip(p=0.5),
-                    transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)),
-                    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.15, hue=0.02),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean=mean, std=std),
-                ])
-                eval_tfms = transforms.Compose([
-                    transforms.Resize((image_size, image_size)),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean=mean, std=std),
-                ])
+            print(f"Training data path: {train_dir}")
+            print(f"Validation data path: {val_dir}")
 
-                device = torch.device("cpu")
-                train_ds = UICategoryDataset(train_dir, category_to_idx, transform=train_tfms)
-                val_ds   = UICategoryDataset(val_dir, category_to_idx, transform=eval_tfms)
-                train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, 
-                                        num_workers=args.num_workers, pin_memory=True)
-                val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                                        num_workers=args.num_workers, pin_memory=True)
+            meta = json.loads(Path(args.model_meta).read_text())
+            image_size = meta["image_size"]
+            mean, std = meta["mean"], meta["std"]
+            categories = meta["categories"]
+            category_to_idx = {c:i for i,c in enumerate(categories)}
+            idx_to_category = {i:c for c,i in category_to_idx.items()}
 
-                # Model setup
-                model = resnet50(weights=None)
-                model.fc = nn.Sequential(nn.Dropout(p=0.2), nn.Linear(model.fc.in_features, len(categories)))
-                model.load_state_dict(torch.load(args.model_init, map_location="cpu"), strict=True)
-                model.to(device)
-                
-                criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
-                optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+            train_tfms = transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)),
+                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.15, hue=0.02),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ])
+            eval_tfms = transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ])
 
-                # Training loop
-                best_val_acc = 0.0
-                for epoch in range(1, args.epochs + 1):
-                    model.train()
-                    epoch_loss, epoch_acc, seen = 0.0, 0.0, 0
-                    t0 = time.time()
-                    for x, y in train_loader:
-                        if -1 in y: continue
-                        x, y = x.to(device), y.to(device)
-                        optimizer.zero_grad(set_to_none=True)
-                        logits = model(x)
-                        loss = criterion(logits, y)
-                        loss.backward()
-                        optimizer.step()
-                        
-                        bs = y.size(0)
-                        epoch_loss += loss.item() * bs
-                        epoch_acc  += accuracy(logits, y) * bs
-                        seen += bs
-                    
-                    train_loss = epoch_loss / max(1, seen)
-                    train_acc  = epoch_acc  / max(1, seen)
-                    val_loss, val_acc = evaluate(model, val_loader, device, criterion)
-                    dt = time.time() - t0
-                    print(f"Epoch {epoch:02d}/{args.epochs} | {dt:.1f}s | Train Loss {train_loss:.4f} Acc {train_acc:.3f} | Val Loss {val_loss:.4f} Acc {val_acc:.3f}")
+            device = torch.device("cpu")  # Keep CPU for reproducibility
+            train_loader = DataLoader(UICategoryDataset(train_dir, category_to_idx, train_tfms),
+                                      batch_size=args.batch_size, shuffle=True,
+                                      num_workers=args.num_workers, pin_memory=True)
+            val_loader = DataLoader(UICategoryDataset(val_dir, category_to_idx, eval_tfms),
+                                    batch_size=args.batch_size, shuffle=False,
+                                    num_workers=args.num_workers, pin_memory=True)
 
-                    if val_acc > best_val_acc:
-                        best_val_acc = val_acc
-                        torch.save({
-                            "model_state": model.state_dict(),
-                            "category_to_idx": category_to_idx,
-                            "idx_to_category": idx_to_category,
-                            "image_size": image_size,
-                        }, args.best_model)
-                        print(f"✓ Saved new best model (val_acc={val_acc:.3f})")
+            model = resnet50(weights=None)
+            model.fc = nn.Sequential(nn.Dropout(p=0.2), nn.Linear(model.fc.in_features, len(categories)))
+            model.load_state_dict(torch.load(args.model_init, map_location="cpu"), strict=True)
+            model.to(device)
 
-                # Save outputs
-                Path(args.label_maps).write_text(json.dumps({
-                    "category_to_idx": category_to_idx, "idx_to_category": idx_to_category
-                }, indent=2))
-                
-                Path(args.train_log).write_text(json.dumps({
-                    "best_val_acc": best_val_acc
-                }, indent=2))
-                
-                print("Training completed successfully!")
-                
-            except Exception as e:
-                print(f"Error occurred: {str(e)}")
-                print("Traceback:")
-                traceback.print_exc()
-                raise  # Re-raise to ensure Kubeflow detects the failure
+            criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
+            optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
+            # --- Training Loop ---
+            best_val_acc = 0.0
+            for epoch in range(1, args.epochs + 1):
+                model.train()
+                epoch_loss, epoch_acc, seen = 0.0, 0.0, 0
+                t0 = time.time()
+                for x, y in train_loader:
+                    mask = y != -1
+                    if mask.sum() == 0:
+                        continue
+                    x, y = x[mask].to(device), y[mask].to(device)
+                    optimizer.zero_grad(set_to_none=True)
+                    logits = model(x)
+                    loss = criterion(logits, y)
+                    loss.backward()
+                    optimizer.step()
+
+                    bs = y.size(0)
+                    epoch_loss += loss.item() * bs
+                    epoch_acc += accuracy(logits, y) * bs
+                    seen += bs
+
+                epoch_loss /= max(1, seen)
+                epoch_acc /= max(1, seen)
+                val_loss, val_acc = evaluate(model, val_loader, device, criterion)
+
+                print(f"Epoch [{epoch}/{args.epochs}] "
+                      f"Train Loss: {epoch_loss:.4f} Train Acc: {epoch_acc:.4f} "
+                      f"Val Loss: {val_loss:.4f} Val Acc: {val_acc:.4f} Time: {time.time()-t0:.1f}s")
+
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    torch.save(model.state_dict(), args.best_model)
+
+            # --- Save metadata ---
+            with open(args.label_maps, "w") as f:
+                json.dump(idx_to_category, f, indent=2)
+
+            with open(args.train_log, "w") as f:
+                json.dump({"best_val_acc": best_val_acc}, f, indent=2)
 
         if __name__ == "__main__":
             main()
-        EOF
-        
-        # Execute the Python script with proper arguments
-        python3 /tmp/train_script.py \
-          --train_data "$1" \
-          --val_data "$2" \
-          --model_init "$3" \
-          --model_meta "$4" \
-          --best_model "$5" \
-          --label_maps "$6" \
-          --train_log "$7"
-    args:
-      - {inputPath: train_data}
-      - {inputPath: val_data}
-      - {inputPath: model_init}
-      - {inputPath: model_meta}
-      - {outputPath: best_model}
-      - {outputPath: label_maps}
-      - {outputPath: train_log}
+args:
+  - {name: --train_data, type: str, required: true}
+  - {name: --val_data, type: str, required: true}
+  - {name: --model_init, type: str, required: true}
+  - {name: --model_meta, type: str, required: true}
+  - {name: --best_model, type: str, required: true}
+  - {name: --label_maps, type: str, required: true}
+  - {name: --train_log, type: str, required: true}
+  - {name: --epochs, type: int, required: false, default: 10}
+  - {name: --batch_size, type: int, required: false, default: 32}
+  - {name: --lr, type: float, required: false, default: 3e-4}
+  - {name: --weight_decay, type: float, required: false, default: 1e-4}
+  - {name: --num_workers, type: int, required: false, default: 2}
+  - {name: --seed, type: int, required: false, default: 42}
+
