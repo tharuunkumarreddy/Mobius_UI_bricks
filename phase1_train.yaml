@@ -234,17 +234,18 @@ implementation:
 
         if __name__ == "__main__":
             main()
-   args:
-  - {name: --train_data, type: str, required: true}
-  - {name: --val_data, type: str, required: true}
-  - {name: --model_init, type: str, required: true}
-  - {name: --model_meta, type: str, required: true}
-  - {name: --best_model, type: str, required: true}
-  - {name: --label_maps, type: str, required: true}
-  - {name: --train_log, type: str, required: true}
-  - {name: --epochs, type: int, required: false, default: 10}
-  - {name: --batch_size, type: int, required: false, default: 32}
-  - {name: --lr, type: float, required: false, default: 3e-4}
-  - {name: --weight_decay, type: float, required: false, default: 1e-4}
-  - {name: --num_workers, type: int, required: false, default: 2}
-  - {name: --seed, type: int, required: false, default: 42}
+              
+    args:
+      - {name: --train_data, type: str, required: true}
+      - {name: --val_data, type: str, required: true}
+      - {name: --model_init, type: str, required: true}
+      - {name: --model_meta, type: str, required: true}
+      - {name: --best_model, type: str, required: true}
+      - {name: --label_maps, type: str, required: true}
+      - {name: --train_log, type: str, required: true}
+      - {name: --epochs, type: int, required: false, default: 10}
+      - {name: --batch_size, type: int, required: false, default: 32}
+      - {name: --lr, type: float, required: false, default: 3e-4}
+      - {name: --weight_decay, type: float, required: false, default: 1e-4}
+      - {name: --num_workers, type: int, required: false, default: 2}
+      - {name: --seed, type: int, required: false, default: 42}
