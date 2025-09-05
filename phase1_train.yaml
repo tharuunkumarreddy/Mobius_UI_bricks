@@ -1,229 +1,256 @@
-{
-  "doc_type": "pipeline",
-  "version": "3.0",
-  "json_schema": "http://api.dataplatform.ibm.com/schemas/common-pipeline/pipeline-flow/pipeline-flow-v3-schema.json",
-  "id": "elyra-auto-generated-pipeline",
-  "primary_pipeline": "primary",
-  "pipelines": [
-    {
-      "id": "primary",
-      "nodes": [
-        {
-          "id": "74364e79-472e-4639-b972-3d46650ac470",
-          "type": "execution_node",
-          "op": "url-catalog:a7fb6c64a783",
-          "app_data": {
-            "component_parameters": {
-              "kubernetes_pod_annotations": [],
-              "kubernetes_pod_labels": [],
-              "kubernetes_shared_mem_size": {},
-              "kubernetes_tolerations": [],
-              "mounted_volumes": []
-            },
-            "component_source": "{\"catalog_type\": \"url-catalog\", \"component_ref\": {\"url\": \"https://raw.githubusercontent.com/tharuunkumarreddy/Mobius_UI_bricks/refs/heads/main/data_loading.yaml\"}}",
-            "label": "",
-            "ui_data": {
-              "label": "load_ui_components_dataset",
-              "image": "/static/elyra/kubeflow.svg",
-              "x_pos": 50,
-              "y_pos": 50,
-              "description": "Load UI components dataset from Kaggle, split into train/val/test, and emit train/test/val descriptors plus manifest and metadata."
-            }
-          },
-          "inputs": [
-            {
-              "id": "inPort",
-              "app_data": {
-                "ui_data": {
-                  "cardinality": {
-                    "min": 0,
-                    "max": -1
-                  },
-                  "label": "Input Port"
-                }
-              }
-            }
-          ],
-          "outputs": [
-            {
-              "id": "outPort",
-              "app_data": {
-                "ui_data": {
-                  "cardinality": {
-                    "min": 0,
-                    "max": -1
-                  },
-                  "label": "Output Port"
-                }
-              }
-            }
-          ]
-        },
-        {
-          "id": "901b4c7a-f764-4756-9d1a-f1a1d6b64206",
-          "type": "execution_node",
-          "op": "url-catalog:7c01977a72e9",
-          "app_data": {
-            "component_parameters": {
-              "categories_json": {
-                "widget": "inputpath",
-                "value": {
-                  "value": "74364e79-472e-4639-b972-3d46650ac470",
-                  "option": "output_categories_json"
-                }
-              },
-              "kubernetes_pod_annotations": [],
-              "kubernetes_pod_labels": [],
-              "kubernetes_shared_mem_size": {},
-              "kubernetes_tolerations": [],
-              "mounted_volumes": []
-            },
-            "component_source": "{\"catalog_type\": \"url-catalog\", \"component_ref\": {\"url\": \"https://raw.githubusercontent.com/tharuunkumarreddy/Mobius_UI_bricks/refs/heads/main/phase1_model_def.yaml\"}}",
-            "label": "",
-            "ui_data": {
-              "label": "phase1_model_def",
-              "image": "/static/elyra/kubeflow.svg",
-              "x_pos": 290,
-              "y_pos": 50,
-              "description": "Create a ResNet50 (ImageNet1K_V2 weights) with the final head sized to num_classes and save model initialization and metadata."
-            }
-          },
-          "inputs": [
-            {
-              "id": "inPort",
-              "app_data": {
-                "ui_data": {
-                  "cardinality": {
-                    "min": 0,
-                    "max": -1
-                  },
-                  "label": "Input Port"
-                }
-              },
-              "links": [
-                {
-                  "id": "a12a6e3e-a3b7-4156-8202-813c585f4002",
-                  "node_id_ref": "74364e79-472e-4639-b972-3d46650ac470",
-                  "port_id_ref": "outPort"
-                }
-              ]
-            }
-          ],
-          "outputs": [
-            {
-              "id": "outPort",
-              "app_data": {
-                "ui_data": {
-                  "cardinality": {
-                    "min": 0,
-                    "max": -1
-                  },
-                  "label": "Output Port"
-                }
-              }
-            }
-          ]
-        },
-        {
-          "id": "a4bff690-41a9-4bff-9fbe-1bd10aa497d3",
-          "type": "execution_node",
-          "op": "url-catalog:8c1a010638b6",
-          "app_data": {
-            "component_parameters": {
-              "train_data": {
-                "widget": "inputpath",
-                "value": {
-                  "value": "74364e79-472e-4639-b972-3d46650ac470",
-                  "option": "output_train_data"
-                }
-              },
-              "val_data": {
-                "widget": "inputpath",
-                "value": {
-                  "value": "74364e79-472e-4639-b972-3d46650ac470",
-                  "option": "output_val_data"
-                }
-              },
-              "model_init": {
-                "widget": "inputpath",
-                "value": {
-                  "value": "901b4c7a-f764-4756-9d1a-f1a1d6b64206",
-                  "option": "output_model_init"
-                }
-              },
-              "model_meta": {
-                "widget": "inputpath",
-                "value": {
-                  "value": "901b4c7a-f764-4756-9d1a-f1a1d6b64206",
-                  "option": "output_model_meta"
-                }
-              },
-              "kubernetes_pod_annotations": [],
-              "kubernetes_pod_labels": [],
-              "kubernetes_shared_mem_size": {},
-              "kubernetes_tolerations": [],
-              "mounted_volumes": []
-            },
-            "component_source": "{\"catalog_type\": \"url-catalog\", \"component_ref\": {\"url\": \"https://raw.githubusercontent.com/tharuunkumarreddy/Mobius_UI_bricks/refs/heads/main/phase1_train.yaml\"}}",
-            "label": "",
-            "ui_data": {
-              "label": "phase1_train_model",
-              "image": "/static/elyra/kubeflow.svg",
-              "x_pos": 530,
-              "y_pos": 50,
-              "description": "Trains the Phase 1 ResNet50 classifier using data from the loading component and the model definition."
-            }
-          },
-          "inputs": [
-            {
-              "id": "inPort",
-              "app_data": {
-                "ui_data": {
-                  "cardinality": {
-                    "min": 0,
-                    "max": -1
-                  },
-                  "label": "Input Port"
-                }
-              },
-              "links": [
-                {
-                  "id": "b2666e5a-5d4f-423c-9167-19856cdf3f49",
-                  "node_id_ref": "901b4c7a-f764-4756-9d1a-f1a1d6b64206",
-                  "port_id_ref": "outPort"
-                }
-              ]
-            }
-          ],
-          "outputs": [
-            {
-              "id": "outPort",
-              "app_data": {
-                "ui_data": {
-                  "cardinality": {
-                    "min": 0,
-                    "max": -1
-                  },
-                  "label": "Output Port"
-                }
-              }
-            }
-          ]
-        }
-      ],
-      "app_data": {
-        "ui_data": {
-          "comments": []
-        },
-        "version": 8,
-        "runtime_type": "KUBEFLOW_PIPELINES",
-        "properties": {
-          "name": "untitled162",
-          "runtime": "Kubeflow Pipelines"
-        }
-      },
-      "runtime_ref": ""
-    }
-  ],
-  "schemas": []
-}
+name: phase1_train_model
+description: Trains the Phase 1 ResNet50 classifier using data from the loading component and the model definition.
+inputs:
+  - {name: train_data, type: Dataset, description: "Pickled dictionary containing the path to the training dataset."}
+  - {name: val_data, type: Dataset, description: "Pickled dictionary containing the path to the validation dataset."}
+  - {name: model_init, type: Model, description: "The initial model weights (.pt file) from the model definition step."}
+  - {name: model_meta, type: String, description: "The model metadata (JSON file) from the model definition step."}
+outputs:
+  - {name: best_model, type: Model, description: "The best trained model weights (.pt file)."}
+  - {name: label_maps, type: Dataset, description: "A JSON file mapping class indices to category names."}
+  - {name: train_log, type: Dataset, description: "A JSON file containing the final training log, including best validation accuracy."}
+implementation:
+  container:
+    image: python:3.9
+    command:
+      - sh
+      - -c
+      - |
+        set -ex  # Enable debugging and exit on error
+        # Install required Python libraries
+        pip install numpy torch torchvision pillow --index-url https://download.pytorch.org/whl/cpu 2>&1
+        
+        # Execute the main Python script with full error reporting
+        python3 -u -c "$(cat << 'EOF'
+        #!/usr/bin/env python3
+        import argparse
+        import json
+        import math
+        import random
+        import time
+        import pickle
+        import traceback
+        from pathlib import Path
+        
+        # Move all imports to the top level
+        import numpy as np
+        import torch
+        import torch.nn as nn
+        import torch.backends.cudnn as cudnn
+        from torch.utils.data import Dataset, DataLoader
+        from torchvision import transforms
+        from torchvision.models import resnet50
+        from PIL import Image
+
+        IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+        def set_seed(seed=42):
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+            cudnn.deterministic = False
+            cudnn.benchmark = True
+
+        def list_images_under_category(category_dir: Path):
+            files = []
+            for comp_dir in sorted(category_dir.iterdir()):
+                if comp_dir.is_dir():
+                    for f in sorted(comp_dir.iterdir()):
+                        if f.is_file() and f.suffix.lower() in IMG_EXTS:
+                            files.append(f)
+            return files
+
+        class UICategoryDataset(Dataset):
+            def __init__(self, split_root: Path, category_to_idx: dict, transform=None):
+                self.transform = transform
+                self.samples = []
+                self.category_to_idx = category_to_idx
+                for cat in sorted(category_to_idx.keys()):
+                    cat_dir = split_root / cat
+                    if not cat_dir.is_dir(): 
+                        print(f"Warning: Category directory not found: {cat_dir}")
+                        continue
+                    for img_path in list_images_under_category(cat_dir):
+                        self.samples.append((img_path, category_to_idx[cat]))
+                if len(self.samples) == 0:
+                    raise RuntimeError(f"FATAL: No images found under the provided path: {split_root}")
+
+            def __len__(self): return len(self.samples)
+
+            def __getitem__(self, idx):
+                path, y = self.samples[idx]
+                try:
+                    img = Image.open(path).convert("RGB")
+                    if self.transform: img = self.transform(img)
+                    return img, y
+                except Exception as e:
+                    print(f"Error loading image {path}: {e}")
+                    return torch.zeros((3, 224, 224)), -1
+
+        def accuracy(outputs, targets):
+            preds = outputs.argmax(dim=1)
+            return (preds == targets).float().mean().item()
+
+        def evaluate(model, loader, device, criterion):
+            model.eval()
+            running_loss, running_acc, n = 0.0, 0.0, 0
+            with torch.no_grad():
+                for x, y in loader:
+                    if -1 in y: continue
+                    x, y = x.to(device), y.to(device)
+                    logits = model(x)
+                    loss = criterion(logits, y)
+                    bs = y.size(0)
+                    running_loss += loss.item() * bs
+                    running_acc  += accuracy(logits, y) * bs
+                    n += bs
+            return running_loss / max(1, n), running_acc / max(1, n)
+
+        def main():
+            parser = argparse.ArgumentParser()
+            parser.add_argument('train_data', type=str, required=True)
+            parser.add_argument('val_data', type=str, required=True)
+            parser.add_argument('model_init', type=str, required=True)
+            parser.add_argument('model_meta', type=str, required=True)
+            parser.add_argument('best_model', type=str, required=True)
+            parser.add_argument('label_maps', type=str, required=True)
+            parser.add_argument('train_log', type=str, required=True)
+            parser.add_argument('epochs', type=int, default=10)
+            parser.add_argument('batch_size', type=int, default=32)
+            parser.add_argument('lr', type=float, default=3e-4)
+            parser.add_argument('weight_decay', type=float, default=1e-4)
+            parser.add_argument('num_workers', type=int, default=2)
+            parser.add_argument('seed', type=int, default=42)
+            args = parser.parse_args()
+
+            try:
+                set_seed(args.seed)
+                for path in [args.best_model, args.label_maps, args.train_log]:
+                    Path(path).parent.mkdir(parents=True, exist_ok=True)
+                
+                # Load data paths
+                with open(args.train_data, 'rb') as f:
+                    train_info = pickle.load(f)
+                train_dir = Path(train_info['data_path'])
+                
+                with open(args.val_data, 'rb') as f:
+                    val_info = pickle.load(f)
+                val_dir = Path(val_info['data_path'])
+
+                print(f"Training data path: {train_dir}")
+                print(f"Validation data path: {val_dir}")
+
+                # Load model metadata
+                meta = json.loads(Path(args.model_meta).read_text())
+                image_size = meta["image_size"]
+                mean, std = meta["mean"], meta["std"]
+                categories = meta["categories"]
+                category_to_idx = {c:i for i,c in enumerate(categories)}
+                idx_to_category = {i:c for c,i in category_to_idx.items()}
+
+                # Data loading
+                train_tfms = transforms.Compose([
+                    transforms.Resize((image_size, image_size)),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)),
+                    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.15, hue=0.02),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=mean, std=std),
+                ])
+                eval_tfms = transforms.Compose([
+                    transforms.Resize((image_size, image_size)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=mean, std=std),
+                ])
+
+                device = torch.device("cpu")
+                train_ds = UICategoryDataset(train_dir, category_to_idx, transform=train_tfms)
+                val_ds   = UICategoryDataset(val_dir, category_to_idx, transform=eval_tfms)
+                train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, 
+                                        num_workers=args.num_workers, pin_memory=True)
+                val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                                        num_workers=args.num_workers, pin_memory=True)
+
+                # Model setup
+                model = resnet50(weights=None)
+                model.fc = nn.Sequential(nn.Dropout(p=0.2), nn.Linear(model.fc.in_features, len(categories)))
+                model.load_state_dict(torch.load(args.model_init, map_location="cpu"), strict=True)
+                model.to(device)
+                
+                criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
+                optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
+                # Training loop
+                best_val_acc = 0.0
+                for epoch in range(1, args.epochs + 1):
+                    model.train()
+                    epoch_loss, epoch_acc, seen = 0.0, 0.0, 0
+                    t0 = time.time()
+                    for x, y in train_loader:
+                        if -1 in y: continue
+                        x, y = x.to(device), y.to(device)
+                        optimizer.zero_grad(set_to_none=True)
+                        logits = model(x)
+                        loss = criterion(logits, y)
+                        loss.backward()
+                        optimizer.step()
+                        
+                        bs = y.size(0)
+                        epoch_loss += loss.item() * bs
+                        epoch_acc  += accuracy(logits, y) * bs
+                        seen += bs
+                    
+                    train_loss = epoch_loss / max(1, seen)
+                    train_acc  = epoch_acc  / max(1, seen)
+                    val_loss, val_acc = evaluate(model, val_loader, device, criterion)
+                    dt = time.time() - t0
+                    print(f"Epoch {epoch:02d}/{args.epochs} | {dt:.1f}s | Train Loss {train_loss:.4f} Acc {train_acc:.3f} | Val Loss {val_loss:.4f} Acc {val_acc:.3f}")
+
+                    if val_acc > best_val_acc:
+                        best_val_acc = val_acc
+                        torch.save({
+                            "model_state": model.state_dict(),
+                            "category_to_idx": category_to_idx,
+                            "idx_to_category": idx_to_category,
+                            "image_size": image_size,
+                        }, args.best_model)
+                        print(f"✓ Saved new best model (val_acc={val_acc:.3f})")
+
+                # Save outputs
+                Path(args.label_maps).write_text(json.dumps({
+                    "category_to_idx": category_to_idx, "idx_to_category": idx_to_category
+                }, indent=2))
+                
+                Path(args.train_log).write_text(json.dumps({
+                    "best_val_acc": best_val_acc
+                }, indent=2))
+                
+                print("Training completed successfully!")
+                
+            except Exception as e:
+                print(f"Error occurred: {str(e)}")
+                print("Traceback:")
+                traceback.print_exc()
+                raise  # Re-raise to ensure Kubeflow detects the failure
+
+        if __name__ == "__main__":
+            main()
+        EOF
+        )" 2>&1
+    args:
+      - train_data
+      - {inputPath: train_data}
+      - val_data
+      - {inputPath: val_data}
+      - model_init
+      - {inputPath: model_init}
+      - model_meta
+      - {inputPath: model_meta}
+      - best_model
+      - {outputPath: best_model}
+      - label_maps
+      - {outputPath: label_maps}
+      - rain_log
+      - {outputPath: train_log}
