@@ -31,6 +31,16 @@ implementation:
         import pickle
         import traceback
         from pathlib import Path
+        
+        # Move all imports to the top level
+        import numpy as np
+        import torch
+        import torch.nn as nn
+        import torch.backends.cudnn as cudnn
+        from torch.utils.data import Dataset, DataLoader
+        from torchvision import transforms
+        from torchvision.models import resnet50
+        from PIL import Image
 
         IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
@@ -226,14 +236,6 @@ implementation:
                 raise  # Re-raise to ensure Kubeflow detects the failure
 
         if __name__ == "__main__":
-            import numpy as np
-            import torch
-            import torch.nn as nn
-            import torch.backends.cudnn as cudnn
-            from torch.utils.data import Dataset, DataLoader
-            from torchvision import transforms
-            from torchvision.models import resnet50
-            from PIL import Image
             main()
         EOF
         )" 2>&1
