@@ -16,12 +16,11 @@ implementation:
       - sh
       - -c
       - |
-        set -ex  # Enable debugging and exit on error
-        # Install required Python libraries
-        pip install numpy torch torchvision pillow --index-url https://download.pytorch.org/whl/cpu 2>&1
+        set -ex
+        pip install numpy torch torchvision pillow --index-url https://download.pytorch.org/whl/cpu
         
-        # Execute the main Python script with full error reporting
-        python3 -u -c "$(cat << 'EOF'
+        # Write Python script to a file
+        cat > /tmp/train_model.py << 'EOF'
         #!/usr/bin/env python3
         import argparse
         import json
@@ -31,8 +30,6 @@ implementation:
         import pickle
         import traceback
         from pathlib import Path
-        
-        # Move all imports to the top level
         import numpy as np
         import torch
         import torch.nn as nn
@@ -110,19 +107,19 @@ implementation:
 
         def main():
             parser = argparse.ArgumentParser()
-            parser.add_argument('train_data', type=str, required=True)
-            parser.add_argument('val_data', type=str, required=True)
-            parser.add_argument('model_init', type=str, required=True)
-            parser.add_argument('model_meta', type=str, required=True)
-            parser.add_argument('best_model', type=str, required=True)
-            parser.add_argument('label_maps', type=str, required=True)
-            parser.add_argument('train_log', type=str, required=True)
-            parser.add_argument('epochs', type=int, default=10)
-            parser.add_argument('batch_size', type=int, default=32)
-            parser.add_argument('lr', type=float, default=3e-4)
-            parser.add_argument('weight_decay', type=float, default=1e-4)
-            parser.add_argument('num_workers', type=int, default=2)
-            parser.add_argument('seed', type=int, default=42)
+            parser.add_argument('--train_data', type=str, required=True)
+            parser.add_argument('--val_data', type=str, required=True)
+            parser.add_argument('--model_init', type=str, required=True)
+            parser.add_argument('--model_meta', type=str, required=True)
+            parser.add_argument('--best_model', type=str, required=True)
+            parser.add_argument('--label_maps', type=str, required=True)
+            parser.add_argument('--train_log', type=str, required=True)
+            parser.add_argument('--epochs', type=int, default=10)
+            parser.add_argument('--batch_size', type=int, default=32)
+            parser.add_argument('--lr', type=float, default=3e-4)
+            parser.add_argument('--weight_decay', type=float, default=1e-4)
+            parser.add_argument('--num_workers', type=int, default=2)
+            parser.add_argument('--seed', type=int, default=42)
             args = parser.parse_args()
 
             try:
@@ -233,25 +230,34 @@ implementation:
                 print(f"Error occurred: {str(e)}")
                 print("Traceback:")
                 traceback.print_exc()
-                raise  # Re-raise to ensure Kubeflow detects the failure
+                raise
 
         if __name__ == "__main__":
             main()
         EOF
-        )" 2>&1
-    args:
-      - train_data
-      - {inputPath: train_data}
-      - val_data
-      - {inputPath: val_data}
-      - model_init
-      - {inputPath: model_init}
-      - model_meta
-      - {inputPath: model_meta}
-      - best_model
-      - {outputPath: best_model}
-      - label_maps
-      - {outputPath: label_maps}
-      - train_log
-      - {outputPath: train_log}
 
+        # Make the script executable and run it with the arguments
+        chmod +x /tmp/train_model.py
+        python3 /tmp/train_model.py \
+          --train_data "$1" \
+          --val_data "$2" \
+          --model_init "$3" \
+          --model_meta "$4" \
+          --best_model "$5" \
+          --label_maps "$6" \
+          --train_log "$7" \
+          --epochs 10 \
+          --batch_size 32 \
+          --lr 0.0003 \
+          --weight_decay 0.0001 \
+          --num_workers 2 \
+          --seed 42
+      - 
+      - 
+      - {inputPath: train_data}
+      - {inputPath: val_data}
+      - {inputPath: model_init}
+      - {inputPath: model_meta}
+      - {outputPath: best_model}
+      - {outputPath: label_maps}
+      - {outputPath: train_log}
