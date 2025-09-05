@@ -252,5 +252,6 @@ implementation:
       - {outputPath: best_model}
       - label_maps
       - {outputPath: label_maps}
-      - rain_log
+      - train_log
       - {outputPath: train_log}
+
