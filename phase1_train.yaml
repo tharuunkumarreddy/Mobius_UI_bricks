@@ -223,7 +223,8 @@ implementation:
                 json.dump({"best_val_acc": best_val_acc}, f, indent=2)
 
         if __name__ == "__main__":
-            main()            
+            main()          
+                  
     args:
       - --train_data
       - {inputPath: train_data}
@@ -239,16 +240,6 @@ implementation:
       - {outputPath: label_maps}
       - --train_log
       - {outputPath: train_log}
-      - --epochs
-      - 10
-      - --batch_size
-      - 32
-      - --lr
-      - 0.0003
-      - --weight_decay
-      - 0.0001
-      - --num_workers
-      - 2
-      - --seed
-      - 42
+
+
 
