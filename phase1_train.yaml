@@ -223,7 +223,7 @@ implementation:
                 json.dump({"best_val_acc": best_val_acc}, f, indent=2)
 
         if __name__ == "__main__":
-            main()
+            main()            
     args:
       - --train_data
       - {inputPath: train_data}
@@ -251,3 +251,4 @@ implementation:
       - 2
       - --seed
       - 42
+
