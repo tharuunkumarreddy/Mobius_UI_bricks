@@ -234,7 +234,7 @@ implementation:
 
         if __name__ == "__main__":
             main()
-args:
+   args:
   - {name: --train_data, type: str, required: true}
   - {name: --val_data, type: str, required: true}
   - {name: --model_init, type: str, required: true}
@@ -248,4 +248,3 @@ args:
   - {name: --weight_decay, type: float, required: false, default: 1e-4}
   - {name: --num_workers, type: int, required: false, default: 2}
   - {name: --seed, type: int, required: false, default: 42}
-
