@@ -55,17 +55,17 @@ implementation:
             return files
 
         class UICategoryDataset(Dataset):
-            def __init__(self, split_root: Path, category_to_idx: dict, transform=None):
+            def __init__(self, split_root: Path, category_to_idx: dict, transform=None, image_size=224):
                 self.transform = transform
                 self.samples = []
-                self.category_to_idx = category_to_idx
-                for cat in sorted(category_to_idx.keys()):
+                self.image_size = image_size
+                for cat, idx in sorted(category_to_idx.items(), key=lambda kv: kv[1]):
                     cat_dir = split_root / cat
                     if not cat_dir.is_dir():
                         print(f"Warning: Category directory not found: {cat_dir}")
                         continue
                     for img_path in list_images_under_category(cat_dir):
-                        self.samples.append((img_path, category_to_idx[cat]))
+                        self.samples.append((img_path, idx))
                 if len(self.samples) == 0:
                     raise RuntimeError(f"FATAL: No images found under the provided path: {split_root}")
 
@@ -79,21 +79,28 @@ implementation:
                     return img, y
                 except Exception as e:
                     print(f"Error loading image {path}: {e}")
-                    return torch.zeros((3, 224, 224)), -1
+                    return torch.zeros((3, self.image_size, self.image_size)), -1
 
         def accuracy(outputs, targets):
             preds = outputs.argmax(dim=1)
             return (preds == targets).float().mean().item()
+
+        def _strip_neg1(x, y):
+            # Filter out rows with y == -1 (failed decode)
+            if isinstance(y, torch.Tensor):
+                mask = y != -1
+                if mask.ndim > 0 and (~mask).any():
+                    x, y = x[mask], y[mask]
+            return x, y
 
         def evaluate(model, loader, device, criterion):
             model.eval()
             running_loss, running_acc, n = 0.0, 0.0, 0
             with torch.no_grad():
                 for x, y in loader:
-                    if (y == -1).any():  # skip corrupted rows
-                        mask = y != -1
-                        x, y = x[mask], y[mask]
-                        if y.numel() == 0: continue
+                    x, y = _strip_neg1(x, y)
+                    if isinstance(y, torch.Tensor) and y.numel() == 0:
+                        continue
                     x, y = x.to(device), y.to(device)
                     logits = model(x)
                     loss = criterion(logits, y)
@@ -139,6 +146,7 @@ implementation:
             print(f"Validation data path: {val_dir}")
             if test_dir: print(f"Test data path: {test_dir}")
 
+            # Quick structure sanity: expect split/category/component/image
             if not train_dir.exists() or not any(train_dir.glob("*/*/*")):
                 raise RuntimeError(f"Train split appears empty at: {train_dir}")
             if not val_dir.exists() or not any(val_dir.glob("*/*/*")):
@@ -146,9 +154,9 @@ implementation:
 
             # Metadata JSON
             meta = json.loads(Path(args.model_meta).read_text())
-            image_size = meta["image_size"]
+            image_size = int(meta["image_size"])
             mean, std  = meta["mean"], meta["std"]
-            categories = meta["categories"]
+            categories = list(meta["categories"])
             category_to_idx = {c: i for i, c in enumerate(categories)}
             idx_to_category = {i: c for c, i in category_to_idx.items()}
 
@@ -168,8 +176,13 @@ implementation:
             ])
 
             device = torch.device("cpu")
-            train_ds = UICategoryDataset(train_dir, category_to_idx, transform=train_tfms)
-            val_ds   = UICategoryDataset(val_dir, category_to_idx, transform=eval_tfms)
+            train_ds = UICategoryDataset(train_dir, category_to_idx, transform=train_tfms, image_size=image_size)
+            val_ds   = UICategoryDataset(val_dir,   category_to_idx, transform=eval_tfms,   image_size=image_size)
+
+            # Small summary
+            print(f"Found {len(train_ds)} training images across {len(categories)} categories")
+            print(f"Found {len(val_ds)} validation images")
+
             train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                                       num_workers=args.num_workers, pin_memory=True)
             val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
@@ -178,7 +191,8 @@ implementation:
             # Optional test loader
             test_loader = None
             if test_dir and test_dir.exists() and any(test_dir.glob("*/*/*")):
-                test_ds = UICategoryDataset(test_dir, category_to_idx, transform=eval_tfms)
+                test_ds = UICategoryDataset(test_dir, category_to_idx, transform=eval_tfms, image_size=image_size)
+                print(f"Found {len(test_ds)} test images")
                 test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False,
                                          num_workers=args.num_workers, pin_memory=True)
 
@@ -199,10 +213,9 @@ implementation:
                 epoch_loss, epoch_acc, seen = 0.0, 0.0, 0
                 t0 = time.time()
                 for x, y in train_loader:
-                    if (y == -1).any():
-                        mask = y != -1
-                        x, y = x[mask], y[mask]
-                        if y.numel() == 0: continue
+                    x, y = _strip_neg1(x, y)
+                    if isinstance(y, torch.Tensor) and y.numel() == 0:
+                        continue
                     x, y = x.to(device), y.to(device)
                     optimizer.zero_grad(set_to_none=True)
                     logits = model(x)
