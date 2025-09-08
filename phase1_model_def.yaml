@@ -2,11 +2,11 @@ name: phase1_model_def
 description: Create a ResNet50 (ImageNet1K_V2 weights) with the final head sized to num_classes and save model initialization and metadata.
 
 inputs:
-  - { name: categories_json, type: Dataset, description: "Path to categories.json file containing class categories" }
+  - { name: categories_json, type: Dataset, description: "JSON file containing class categories (list of strings)" }
 
 outputs:
-  - { name: model_init, type: Model, description: "Model initialization weights (torch saved state_dict)" }
-  - { name: model_meta, type: String, description: "Model metadata as JSON including image_size, mean, std, num_classes, categories" }
+  - { name: model_init, type: Model,   description: "Model initialization weights (torch saved state_dict)" }
+  - { name: model_meta, type: Dataset, description: "Model metadata as JSON including image_size, mean, std, num_classes, categories" }
 
 implementation:
   container:
@@ -17,7 +17,6 @@ implementation:
       - |
         # Install required dependencies
         pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-        
         exec "$0" "$@"
       - python3
       - -u
@@ -26,30 +25,32 @@ implementation:
         #!/usr/bin/env python3
         import argparse
         import json
+        import os
+        from pathlib import Path
         import torch
         import torch.nn as nn
-        import os
-        import pickle
-        from pathlib import Path
         from torchvision.models import resnet50, ResNet50_Weights
 
         def main():
             parser = argparse.ArgumentParser()
-            parser.add_argument('--categories_json', type=str, required=True)
-            parser.add_argument('--model_init', type=str, required=True)
-            parser.add_argument('--model_meta', type=str, required=True)
+            parser.add_argument('--categories_json', type=str, required=True)  # JSON file path
+            parser.add_argument('--model_init', type=str, required=True)       # output file path
+            parser.add_argument('--model_meta', type=str, required=True)       # output file path
             parser.add_argument('--image_size', type=int, default=224)
             args = parser.parse_args()
 
             # Ensure output directories exist
-            os.makedirs(os.path.dirname(args.model_init), exist_ok=True)
-            os.makedirs(os.path.dirname(args.model_meta), exist_ok=True)
+            Path(args.model_init).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.model_meta).parent.mkdir(parents=True, exist_ok=True)
 
-            # Read categories from the provided pickle file (not JSON)
-            with open(args.categories_json, 'rb') as f:
-                categories = pickle.load(f)
+            # Read categories from JSON file
+            categories = json.loads(Path(args.categories_json).read_text())
+            if not isinstance(categories, list) or not all(isinstance(c, str) for c in categories):
+                raise ValueError("categories_json must be a JSON list of strings")
             num_classes = len(categories)
-            
+            if num_classes < 2:
+                raise ValueError(f"Need >= 2 categories, got {num_classes}")
+
             print(f"Number of classes: {num_classes}")
             print(f"Categories: {categories}")
 
@@ -72,11 +73,8 @@ implementation:
                 "num_classes": num_classes,
                 "categories": categories
             }
-            
-            with open(args.model_meta, 'w') as f:
-                json.dump(meta, f, indent=2)
+            Path(args.model_meta).write_text(json.dumps(meta, indent=2))
 
-            # Confirmation
             print(f"Saved model initialization to: {args.model_init}")
             print(f"Saved model metadata to: {args.model_meta}")
             print(f"Model metadata: {meta}")
