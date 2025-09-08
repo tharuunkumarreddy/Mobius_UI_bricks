@@ -1,14 +1,15 @@
 name: phase1_train_model
-description: Trains the Phase 1 ResNet50 classifier using data from the loading component and the model definition.
+description: Trains the Phase 1 ResNet50 classifier using directory inputs from the loader and the model definition.
 inputs:
-  - {name: train_data, type: Dataset, description: "Pickled dictionary containing the path to the training dataset."}
-  - {name: val_data, type: Dataset, description: "Pickled dictionary containing the path to the validation dataset."}
-  - {name: model_init, type: Model, description: "The initial model weights (.pt file) from the model definition step."}
-  - {name: model_meta, type: String, description: "The model metadata (JSON file) from the model definition step."}
+  - { name: train_data, type: Dataset, description: "Directory: train split (category/component/IMGs)" }
+  - { name: val_data,   type: Dataset, description: "Directory: val split (category/component/IMGs)" }
+  - { name: test_data,  type: Dataset, description: "Directory: test split (category/component/IMGs). Optional; used for final eval only." }
+  - { name: model_init, type: Model,   description: "Initial model weights (.pt) from the model definition step." }
+  - { name: model_meta, type: Dataset, description: "Model metadata JSON from the model definition step." }
 outputs:
-  - {name: best_model, type: Model, description: "The best trained model weights (.pt file)."}
-  - {name: label_maps, type: Dataset, description: "A JSON file mapping class indices to category names."}
-  - {name: train_log, type: Dataset, description: "A JSON file containing the final training log, including best validation accuracy."}
+  - { name: best_model, type: Model,   description: "The best trained model weights (.pt file)." }
+  - { name: label_maps, type: Dataset, description: "JSON mapping: {index: category}." }
+  - { name: train_log,  type: Dataset, description: "JSON with best validation accuracy and optional test accuracy." }
 implementation:
   container:
     image: python:3.9
@@ -17,21 +18,14 @@ implementation:
       - -c
       - |
         set -e
-        # Install required Python libraries
         pip install numpy torch torchvision pillow --index-url https://download.pytorch.org/whl/cpu
-
-        # Execute the main Python script
         exec "$0" "$@"
       - python3
       - -u
       - -c
       - |
         #!/usr/bin/env python3
-        import argparse
-        import json
-        import random
-        import time
-        import pickle
+        import argparse, json, random, time
         from pathlib import Path
 
         import numpy as np
@@ -45,23 +39,19 @@ implementation:
 
         IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
-        # ------------------- Utility Functions -------------------
+        # ------------------- Utilities -------------------
         def set_seed(seed=42):
-            random.seed(seed)
-            np.random.seed(seed)
-            torch.manual_seed(seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(seed)
-            cudnn.deterministic = False
-            cudnn.benchmark = True
+            random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+            if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
+            cudnn.deterministic = False; cudnn.benchmark = True
 
         def list_images_under_category(category_dir: Path):
             files = []
-            for comp_dir in sorted(category_dir.iterdir()):
-                if comp_dir.is_dir():
-                    for f in sorted(comp_dir.iterdir()):
-                        if f.is_file() and f.suffix.lower() in IMG_EXTS:
-                            files.append(f)
+            if not category_dir.exists(): return files
+            for comp_dir in sorted([p for p in category_dir.iterdir() if p.is_dir()]):
+                for f in sorted(comp_dir.iterdir()):
+                    if f.is_file() and f.suffix.lower() in IMG_EXTS:
+                        files.append(f)
             return files
 
         class UICategoryDataset(Dataset):
@@ -79,8 +69,7 @@ implementation:
                 if len(self.samples) == 0:
                     raise RuntimeError(f"FATAL: No images found under the provided path: {split_root}")
 
-            def __len__(self):
-                return len(self.samples)
+            def __len__(self): return len(self.samples)
 
             def __getitem__(self, idx):
                 path, y = self.samples[idx]
@@ -101,8 +90,10 @@ implementation:
             running_loss, running_acc, n = 0.0, 0.0, 0
             with torch.no_grad():
                 for x, y in loader:
-                    if -1 in y: 
-                        continue
+                    if (y == -1).any():  # skip corrupted rows
+                        mask = y != -1
+                        x, y = x[mask], y[mask]
+                        if y.numel() == 0: continue
                     x, y = x.to(device), y.to(device)
                     logits = model(x)
                     loss = criterion(logits, y)
@@ -110,50 +101,58 @@ implementation:
                     running_loss += loss.item() * bs
                     running_acc  += accuracy(logits, y) * bs
                     n += bs
-            return running_loss / max(1, n), running_acc / max(1, n)
+            if n == 0:
+                return float("inf"), 0.0
+            return running_loss / n, running_acc / n
 
-        # ------------------- Main Training Function -------------------
+        # ------------------- Main -------------------
         def main():
-            parser = argparse.ArgumentParser()
-            parser.add_argument('--train_data', type=str, required=True)
-            parser.add_argument('--val_data', type=str, required=True)
-            parser.add_argument('--model_init', type=str, required=True)
-            parser.add_argument('--model_meta', type=str, required=True)
-            parser.add_argument('--best_model', type=str, required=True)
-            parser.add_argument('--label_maps', type=str, required=True)
-            parser.add_argument('--train_log', type=str, required=True)
-            parser.add_argument('--epochs', type=int, default=10)
-            parser.add_argument('--batch_size', type=int, default=32)
-            parser.add_argument('--lr', type=float, default=3e-4)
-            parser.add_argument('--weight_decay', type=float, default=1e-4)
-            parser.add_argument('--num_workers', type=int, default=2)
-            parser.add_argument('--seed', type=int, default=42)
-            args = parser.parse_args()
+            ap = argparse.ArgumentParser()
+            ap.add_argument('--train_data', required=True)
+            ap.add_argument('--val_data',   required=True)
+            ap.add_argument('--test_data',  required=False, default="")
+            ap.add_argument('--model_init', required=True)
+            ap.add_argument('--model_meta', required=True)
+            ap.add_argument('--best_model', required=True)
+            ap.add_argument('--label_maps', required=True)
+            ap.add_argument('--train_log',  required=True)
+            ap.add_argument('--epochs', type=int, default=10)
+            ap.add_argument('--batch_size', type=int, default=32)
+            ap.add_argument('--lr', type=float, default=3e-4)
+            ap.add_argument('--weight_decay', type=float, default=1e-4)
+            ap.add_argument('--num_workers', type=int, default=2)
+            ap.add_argument('--seed', type=int, default=42)
+            args = ap.parse_args()
 
             set_seed(args.seed)
 
-            for path in [args.best_model, args.label_maps, args.train_log]:
-                Path(path).parent.mkdir(parents=True, exist_ok=True)
+            # Prepare output dirs
+            for p in [args.best_model, args.label_maps, args.train_log]:
+                Path(p).parent.mkdir(parents=True, exist_ok=True)
 
-            with open(args.train_data, 'rb') as f:
-                train_info = pickle.load(f)
-            train_dir = Path(train_info['data_path'])
-
-            with open(args.val_data, 'rb') as f:
-                val_info = pickle.load(f)
-            val_dir = Path(val_info['data_path'])
+            # Directories (from loader artifacts)
+            train_dir = Path(args.train_data)
+            val_dir   = Path(args.val_data)
+            test_dir  = Path(args.test_data) if args.test_data else None
 
             print(f"Training data path: {train_dir}")
             print(f"Validation data path: {val_dir}")
+            if test_dir: print(f"Test data path: {test_dir}")
 
+            if not train_dir.exists() or not any(train_dir.glob("*/*/*")):
+                raise RuntimeError(f"Train split appears empty at: {train_dir}")
+            if not val_dir.exists() or not any(val_dir.glob("*/*/*")):
+                raise RuntimeError(f"Val split appears empty at: {val_dir}")
+
+            # Metadata JSON
             meta = json.loads(Path(args.model_meta).read_text())
             image_size = meta["image_size"]
-            mean, std = meta["mean"], meta["std"]
+            mean, std  = meta["mean"], meta["std"]
             categories = meta["categories"]
-            category_to_idx = {c:i for i,c in enumerate(categories)}
-            idx_to_category = {i:c for c,i in category_to_idx.items()}
+            category_to_idx = {c: i for i, c in enumerate(categories)}
+            idx_to_category = {i: c for c, i in category_to_idx.items()}
 
-            # Data transforms
+            # Transforms
             train_tfms = transforms.Compose([
                 transforms.Resize((image_size, image_size)),
                 transforms.RandomHorizontalFlip(p=0.5),
@@ -170,76 +169,93 @@ implementation:
 
             device = torch.device("cpu")
             train_ds = UICategoryDataset(train_dir, category_to_idx, transform=train_tfms)
-            val_ds = UICategoryDataset(val_dir, category_to_idx, transform=eval_tfms)
-            train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
-            val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+            val_ds   = UICategoryDataset(val_dir, category_to_idx, transform=eval_tfms)
+            train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                                      num_workers=args.num_workers, pin_memory=True)
+            val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                                      num_workers=args.num_workers, pin_memory=True)
+
+            # Optional test loader
+            test_loader = None
+            if test_dir and test_dir.exists() and any(test_dir.glob("*/*/*")):
+                test_ds = UICategoryDataset(test_dir, category_to_idx, transform=eval_tfms)
+                test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False,
+                                         num_workers=args.num_workers, pin_memory=True)
 
             # Model
             model = resnet50(weights=None)
             model.fc = nn.Sequential(nn.Dropout(p=0.2), nn.Linear(model.fc.in_features, len(categories)))
-            model.load_state_dict(torch.load(args.model_init, map_location="cpu"), strict=True)
+            state = torch.load(args.model_init, map_location="cpu")
+            model.load_state_dict(state, strict=True)
             model.to(device)
 
             criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
             optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-            # Training loop
+            # Train
             best_val_acc = 0.0
             for epoch in range(1, args.epochs + 1):
                 model.train()
                 epoch_loss, epoch_acc, seen = 0.0, 0.0, 0
                 t0 = time.time()
                 for x, y in train_loader:
-                    if -1 in y: 
-                        continue
+                    if (y == -1).any():
+                        mask = y != -1
+                        x, y = x[mask], y[mask]
+                        if y.numel() == 0: continue
                     x, y = x.to(device), y.to(device)
                     optimizer.zero_grad(set_to_none=True)
                     logits = model(x)
                     loss = criterion(logits, y)
                     loss.backward()
                     optimizer.step()
-                    
+
                     bs = y.size(0)
                     epoch_loss += loss.item() * bs
                     epoch_acc  += accuracy(logits, y) * bs
                     seen += bs
 
                 train_loss = epoch_loss / max(1, seen)
-                train_acc  = epoch_acc / max(1, seen)
+                train_acc  = epoch_acc  / max(1, seen)
                 val_loss, val_acc = evaluate(model, val_loader, device, criterion)
-
-                print(f"Epoch {epoch}: Train Loss {train_loss:.4f}, Train Acc {train_acc:.4f}, Val Loss {val_loss:.4f}, Val Acc {val_acc:.4f}, Time {time.time()-t0:.1f}s")
+                print(f"Epoch {epoch:02d}: Train {train_loss:.4f}/{train_acc:.4f} | Val {val_loss:.4f}/{val_acc:.4f} | {time.time()-t0:.1f}s")
 
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
                     torch.save(model.state_dict(), args.best_model)
-            
-            # Save label mapping
-            with open(args.label_maps, "w") as f:
-                json.dump(idx_to_category, f, indent=2)
 
-            # Save training log
-            with open(args.train_log, "w") as f:
-                json.dump({"best_val_acc": best_val_acc}, f, indent=2)
+            # Final (optional) test evaluation using best model
+            test_acc = None
+            if test_loader is not None:
+                best_state = torch.load(args.best_model, map_location="cpu")
+                model.load_state_dict(best_state, strict=True)
+                _, test_acc = evaluate(model, test_loader, device, criterion)
+                print(f"Final Test Acc: {test_acc:.4f}")
+
+            # Label map
+            Path(args.label_maps).write_text(json.dumps(idx_to_category, indent=2))
+
+            # Log
+            log = {"best_val_acc": best_val_acc}
+            if test_acc is not None: log["test_acc"] = test_acc
+            Path(args.train_log).write_text(json.dumps(log, indent=2))
 
         if __name__ == "__main__":
-            main()          
-                  
+            main()
     args:
       - --train_data
-      - {inputPath: train_data}
+      - {inputPath: train_data}     # directory
       - --val_data
-      - {inputPath: val_data}
+      - {inputPath: val_data}       # directory
+      - --test_data
+      - {inputPath: test_data}      # directory (optional)
       - --model_init
-      - {inputPath: model_init}
+      - {inputPath: model_init}     # file
       - --model_meta
-      - {inputPath: model_meta}
+      - {inputPath: model_meta}     # JSON file
       - --best_model
-      - {outputPath: best_model}
+      - {outputPath: best_model}    # file (e.g., phase1_resnet50_best.pt)
       - --label_maps
-      - {outputPath: label_maps}
+      - {outputPath: label_maps}    # file (e.g., phase1_label_maps.json)
       - --train_log
-      - {outputPath: train_log}
-
-
-
+      - {outputPath: train_log}     # file (e.g., phase1_train_log.json)
