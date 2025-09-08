@@ -25,7 +25,7 @@ implementation:
       - -c
       - |
         #!/usr/bin/env python3
-        import argparse, json, random, time
+        import argparse, json, random, time, os
         from pathlib import Path
 
         import numpy as np
@@ -127,7 +127,7 @@ implementation:
             ap.add_argument('--batch_size', type=int, default=32)
             ap.add_argument('--lr', type=float, default=3e-4)
             ap.add_argument('--weight_decay', type=float, default=1e-4)
-            ap.add_argument('--num_workers', type=int, default=2)
+            ap.add_argument('--num_workers', type=int, default=0)  # <<< avoid shm
             ap.add_argument('--seed', type=int, default=42)
             args = ap.parse_args()
 
@@ -176,30 +176,37 @@ implementation:
             ])
 
             device = torch.device("cpu")
+            # DataLoader kwargs tuned to avoid /dev/shm usage
+            nw = max(0, int(args.num_workers))
+            dl_common = dict(num_workers=nw, pin_memory=False, persistent_workers=False)
+            # prefetch_factor only valid when num_workers > 0; otherwise skip
+            if nw > 0:
+                dl_common["prefetch_factor"] = 1
+
             train_ds = UICategoryDataset(train_dir, category_to_idx, transform=train_tfms, image_size=image_size)
             val_ds   = UICategoryDataset(val_dir,   category_to_idx, transform=eval_tfms,   image_size=image_size)
 
-            # Small summary
             print(f"Found {len(train_ds)} training images across {len(categories)} categories")
             print(f"Found {len(val_ds)} validation images")
 
-            train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                                      num_workers=args.num_workers, pin_memory=True)
-            val_loader   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                                      num_workers=args.num_workers, pin_memory=True)
+            train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  **dl_common)
+            val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, **dl_common)
 
             # Optional test loader
             test_loader = None
             if test_dir and test_dir.exists() and any(test_dir.glob("*/*/*")):
                 test_ds = UICategoryDataset(test_dir, category_to_idx, transform=eval_tfms, image_size=image_size)
                 print(f"Found {len(test_ds)} test images")
-                test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False,
-                                         num_workers=args.num_workers, pin_memory=True)
+                test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, **dl_common)
 
             # Model
             model = resnet50(weights=None)
             model.fc = nn.Sequential(nn.Dropout(p=0.2), nn.Linear(model.fc.in_features, len(categories)))
-            state = torch.load(args.model_init, map_location="cpu")
+            # Safe torch.load to silence FutureWarning, with fallback for older torch
+            try:
+                state = torch.load(args.model_init, map_location="cpu", weights_only=True)
+            except TypeError:
+                state = torch.load(args.model_init, map_location="cpu")
             model.load_state_dict(state, strict=True)
             model.to(device)
 
