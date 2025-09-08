@@ -1,12 +1,12 @@
 name: load_ui_components_dataset
-description: Load UI components dataset from Kaggle, split into train/val/test, and emit train/test/val descriptors plus manifest and metadata.
+description: Load UI components dataset from Kaggle, split into train/val/test, and emit train/test/val folders plus manifest and metadata.
 outputs:
-  - {name: train_data, type: Dataset}
-  - {name: test_data, type: Dataset}
-  - {name: val_data, type: Dataset}
-  - {name: dataset_manifest, type: Dataset}
-  - {name: categories_json, type: Dataset}
-  - {name: components_mapping, type: Dataset}
+  - { name: train_data, type: Dataset, description: "Directory: train split (category/component/IMGs)" }
+  - { name: test_data,  type: Dataset, description: "Directory: test split (category/component/IMGs)" }
+  - { name: val_data,   type: Dataset, description: "Directory: val split (category/component/IMGs)" }
+  - { name: dataset_manifest,   type: Dataset, description: "CSV manifest of all splits" }
+  - { name: categories_json,    type: Dataset, description: "JSON list of category names" }
+  - { name: components_mapping, type: Dataset, description: "JSON dict: {category: [components...]}" }
 implementation:
   container:
     image: python:3.9
@@ -16,12 +16,12 @@ implementation:
       - |
         set -euo pipefail
 
-        # ---- System & Python deps ----
+        # ---------- System & Python deps (consider pre-baking) ----------
         apt-get update -y && apt-get install -y unzip wget
         python -m pip install --no-cache-dir --upgrade pip
         python -m pip install --no-cache-dir kaggle pandas
 
-        # ---- Hardcode Kaggle credentials (use secrets in prod) ----
+        # ---------- Hardcode Kaggle credentials ----------
         mkdir -p /root/.kaggle
         cat > /root/.kaggle/kaggle.json <<'EOF'
         {
@@ -30,103 +30,54 @@ implementation:
         }
         EOF
         chmod 600 /root/.kaggle/kaggle.json
-
-        # ---- Kaggle download ----
+        # ---------- Download dataset ----------
         WORKDIR="/ui_components_temp"
         mkdir -p "$WORKDIR"
-
-        echo "Downloading Kaggle dataset to $WORKDIR ..."
-        echo "Dataset URL:"
-        echo "https://www.kaggle.com/datasets/chtharunkumarreddy09/classification-dataset-4"
         kaggle datasets download -d chtharunkumarreddy09/classification-dataset-4 -p "$WORKDIR" --force
 
         ZIP_PATH="$(ls -1 "$WORKDIR"/*.zip | head -n1 || true)"
-        if [ -z "$ZIP_PATH" ]; then
-          echo "ERROR: Zip not found after download." >&2
-          exit 1
-        fi
-
-        echo "Unzipping $ZIP_PATH ..."
+        [ -n "$ZIP_PATH" ] || { echo "ERROR: Zip not found after download"; exit 1; }
         unzip -q "$ZIP_PATH" -d "$WORKDIR"
 
-        # Detect dataset root
-        if SRC_DIR="$(find "$WORKDIR" -type d -name 'Classification_Dataset' -print -quit)"; then
-          :
-        else
-          SRC_DIR="$(find "$WORKDIR" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
-        fi
-
-        if [ -z "$SRC_DIR" ] || [ ! -d "$SRC_DIR" ]; then
-          echo "ERROR: Could not locate extracted dataset directory under $WORKDIR." >&2
-          find "$WORKDIR" -maxdepth 2 -type d -print >&2 || true
-          exit 1
-        fi
-
-        echo "Detected dataset root: $SRC_DIR"
+        # Detect root folder of extracted dataset
+        SRC_DIR="$(find "$WORKDIR" -type d -name 'Classification_Dataset' -print -quit || true)"
+        [ -n "$SRC_DIR" ] || SRC_DIR="$(find "$WORKDIR" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
+        [ -d "$SRC_DIR" ] || { echo "ERROR: Could not locate dataset root under $WORKDIR"; exit 1; }
         export SRC_DIR
+        echo "Detected dataset root: $SRC_DIR"
 
-        echo "Forwarded container args (for debugging):" "$@"
-
-        # ---- Run processing script; use environment variables instead of args ----
-        # Set environment variables for the Python script
-        export TRAIN_DATA_PATH="$1"
-        export TEST_DATA_PATH="$3"
-        export VAL_DATA_PATH="$5" 
-        export DATASET_MANIFEST_PATH="$7"
-        export CATEGORIES_JSON_PATH="$9"
-        export COMPONENTS_MAPPING_PATH="${11}"
-
+        # ---------- Prepare processor ----------
         cat > /tmp/process_dataset.py <<'PY'
         #!/usr/bin/env python3
-        import json, random, shutil, os, pickle, sys
+        import json, random, shutil, os, sys
         from pathlib import Path
         from math import floor
+        import argparse
         import pandas as pd
-
-        # Defaults that match KFP container contract (use env vars instead of args)
-        def _kfp_out(name: str) -> str:
-            return f"/tmp/outputs/{name}/data"
-
-        # Get paths from environment variables (set by bash script)
-        train_data_path = os.environ.get('TRAIN_DATA_PATH', _kfp_out("train_data"))
-        test_data_path = os.environ.get('TEST_DATA_PATH', _kfp_out("test_data"))
-        val_data_path = os.environ.get('VAL_DATA_PATH', _kfp_out("val_data"))
-        dataset_manifest_path = os.environ.get('DATASET_MANIFEST_PATH', _kfp_out("dataset_manifest"))
-        categories_json_path = os.environ.get('CATEGORIES_JSON_PATH', _kfp_out("categories_json"))
-        components_mapping_path = os.environ.get('COMPONENTS_MAPPING_PATH', _kfp_out("components_mapping"))
 
         ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
         def list_images(folder: Path):
             return [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in ALLOWED_EXTS]
 
-        def ensure_dirs(p: Path):
-            p.mkdir(parents=True, exist_ok=True)
-
-        def transfer(src: Path, dst_dir: Path, move: bool):
-            ensure_dirs(dst_dir)
-            if move:
-                shutil.move(str(src), str(dst_dir / src.name))
-            else:
-                shutil.copy2(src, dst_dir / src.name)
-
         def is_category_dir(d: Path):
+            # category contains component subfolders
             return d.is_dir() and any(child.is_dir() for child in d.iterdir())
 
         def get_categories(root: Path):
             cats = [d for d in root.iterdir() if is_category_dir(d)]
             if not cats:
-                candidates = [d for d in root.iterdir() if d.is_dir()]
-                for d in candidates:
+                # Try one more level down
+                for d in [d for d in root.iterdir() if d.is_dir()]:
                     deeper = [x for x in d.iterdir() if is_category_dir(x)]
                     if deeper:
                         return deeper
             return cats
 
         def safe_split(n, tr, va, te):
-            base_tr = floor(n * tr)
-            base_va = floor(n * va)
-            base_te = floor(n * te)
+            base_tr = int(n * tr)
+            base_va = int(n * va)
+            base_te = int(n * te)
             leftover = n - (base_tr + base_va + base_te)
             parts = [("train", tr), ("val", va), ("test", te)]
             parts.sort(key=lambda x: x[1], reverse=True)
@@ -137,6 +88,10 @@ implementation:
                 leftover -= 1
             return counts["train"], counts["val"], counts["test"]
 
+        def copyfile(src: Path, dst: Path):
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
         def discover_components(train_root: Path):
             mapping = {}
             if not train_root.exists():
@@ -146,134 +101,127 @@ implementation:
                 mapping[cat.name] = comps
             return mapping
 
-        # Source dataset root from env (set by shell after unzip)
-        src_root_env = os.environ.get("SRC_DIR", "").strip()
-        src_root = Path(src_root_env) if src_root_env else Path("/ui_components_temp/Classification_Dataset")
-        print(f"[INFO] Using source root: {src_root}")
+        def main():
+            ap = argparse.ArgumentParser()
+            ap.add_argument("--src_root", required=True, help="Extracted Kaggle dataset root")
+            ap.add_argument("--out_train", required=True)    # directory
+            ap.add_argument("--out_val", required=True)      # directory
+            ap.add_argument("--out_test", required=True)     # directory
+            ap.add_argument("--out_manifest", required=True) # file (CSV)
+            ap.add_argument("--out_categories", required=True) # file (JSON)
+            ap.add_argument("--out_components", required=True) # file (JSON)
+            ap.add_argument("--train_ratio", type=float, default=0.70)
+            ap.add_argument("--val_ratio", type=float, default=0.15)
+            ap.add_argument("--test_ratio", type=float, default=0.15)
+            ap.add_argument("--seed", type=int, default=42)
+            args = ap.parse_args()
 
-        out_root = Path("/tmp/processed_data")
-        train_ratio, val_ratio, test_ratio = 0.70, 0.15, 0.15
-        seed, move_files = 42, False
+            assert abs((args.train_ratio + args.val_ratio + args.test_ratio) - 1.0) < 1e-6
 
-        assert abs((train_ratio + val_ratio + test_ratio) - 1.0) < 1e-6, "Ratios must sum to 1.0"
-        random.seed(seed)
-        ensure_dirs(out_root)
+            src_root = Path(args.src_root)
+            if not src_root.exists():
+                raise SystemExit(f"Source root not found: {src_root}")
 
-        if not src_root.exists():
-            base = Path("/ui_components_temp")
-            if base.exists():
-                for p in base.iterdir():
-                    print(" -", p, file=sys.stderr)
-            raise SystemExit(f"No category folders found under: {src_root}")
+            random.seed(args.seed)
 
-        categories = get_categories(src_root)
-        if not categories:
-            raise SystemExit(f"No category folders found under: {src_root}")
+            out_train = Path(args.out_train)
+            out_val   = Path(args.out_val)
+            out_test  = Path(args.out_test)
+            out_train.mkdir(parents=True, exist_ok=True)
+            out_val.mkdir(parents=True, exist_ok=True)
+            out_test.mkdir(parents=True, exist_ok=True)
 
-        for cat in categories:
-            components = [d for d in cat.iterdir() if d.is_dir()]
-            if not components:
-                print(f"[WARN] No component folders in category: {cat.name}")
-                continue
+            categories = get_categories(src_root)
+            if not categories:
+                raise SystemExit(f"No category folders found under: {src_root}")
 
-            for comp in components:
-                imgs = list_images(comp)
-                if not imgs:
-                    print(f"[WARN] No images in: {cat.name}/{comp.name}")
+            # Split & copy
+            for cat in categories:
+                components = [d for d in cat.iterdir() if d.is_dir()]
+                if not components:
+                    print(f"[WARN] No components in category: {cat.name}")
                     continue
 
-                random.shuffle(imgs)
-                n = len(imgs)
-                n_tr, n_va, n_te = safe_split(n, train_ratio, val_ratio, test_ratio)
+                for comp in components:
+                    imgs = list_images(comp)
+                    if not imgs:
+                        print(f"[WARN] No images in: {cat.name}/{comp.name}")
+                        continue
 
-                train_files = imgs[:n_tr]
-                val_files   = imgs[n_tr:n_tr+n_va]
-                test_files  = imgs[n_tr+n_va:n_tr+n_va+n_te]
+                    random.shuffle(imgs)
+                    n_tr, n_va, n_te = safe_split(len(imgs), args.train_ratio, args.val_ratio, args.test_ratio)
+                    train_files = imgs[:n_tr]
+                    val_files   = imgs[n_tr:n_tr+n_va]
+                    test_files  = imgs[n_tr+n_va:n_tr+n_va+n_te]
 
-                for f in train_files:
-                    transfer(f, out_root / "train" / cat.name / comp.name, move=move_files)
-                for f in val_files:
-                    transfer(f, out_root / "val" / cat.name / comp.name, move=move_files)
-                for f in test_files:
-                    transfer(f, out_root / "test" / cat.name / comp.name, move=move_files)
+                    for f in train_files:
+                        dst = out_train / cat.name / comp.name / f.name
+                        copyfile(f, dst)
+                    for f in val_files:
+                        dst = out_val / cat.name / comp.name / f.name
+                        copyfile(f, dst)
+                    for f in test_files:
+                        dst = out_test / cat.name / comp.name / f.name
+                        copyfile(f, dst)
 
-        rows = []
-        for split in ["train", "val", "test"]:
-            split_dir = out_root / split
-            if not split_dir.exists(): 
-                continue
-            for cat in sorted([d for d in split_dir.iterdir() if d.is_dir()]):
-                for comp in sorted([c for c in cat.iterdir() if c.is_dir()]):
-                    for img in comp.iterdir():
-                        if img.suffix.lower() in ALLOWED_EXTS:
-                            rows.append({"path": str(img), "split": split, "category": cat.name, "component": comp.name})
+            # Manifest
+            rows = []
+            for split, root in [("train", out_train), ("val", out_val), ("test", out_test)]:
+                if not root.exists(): continue
+                for cat in sorted([d for d in root.iterdir() if d.is_dir()]):
+                    for comp in sorted([c for c in cat.iterdir() if c.is_dir()]):
+                        for img in comp.rglob("*"):
+                            if img.is_file() and img.suffix.lower() in ALLOWED_EXTS:
+                                rows.append({
+                                    "path": str(img),
+                                    "split": split,
+                                    "category": cat.name,
+                                    "component": comp.name
+                                })
+            manifest = pd.DataFrame(rows)
+            Path(args.out_manifest).parent.mkdir(parents=True, exist_ok=True)
+            manifest.to_csv(args.out_manifest, index=False)
 
-        manifest = pd.DataFrame(rows)
-        manifest_path = out_root / "dataset_manifest.csv"
-        manifest.to_csv(manifest_path, index=False)
+            # Categories & components mapping based on the *train* split
+            cats = sorted([d.name for d in out_train.iterdir() if d.is_dir()]) if out_train.exists() else []
+            comp_map = discover_components(out_train)
 
-        cats = sorted([d.name for d in (out_root / "train").iterdir() if d.is_dir()]) if (out_root / "train").exists() else []
-        categories_path = out_root / "categories.json"
-        categories_path.write_text(json.dumps(cats, indent=2))
+            Path(args.out_categories).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.out_components).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.out_categories).write_text(json.dumps(cats, indent=2))
+            Path(args.out_components).write_text(json.dumps(comp_map, indent=2))
 
-        comp_map = discover_components(out_root / "train")
-        components_path = out_root / "components_mapping.json"
-        components_path.write_text(json.dumps(comp_map, indent=2))
+            print("Emitted artifacts:")
+            print(" - train:", out_train)
+            print(" - val  :", out_val)
+            print(" - test :", out_test)
+            print(" - manifest:", args.out_manifest)
+            print(" - categories:", args.out_categories)
+            print(" - components:", args.out_components)
 
-        def _makedirs_for(path_str: str) -> Path:
-            p = Path(path_str)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            return p
-
-        with open(_makedirs_for(train_data_path), "wb") as f:
-            pickle.dump({"data_path": str(out_root / "train"),
-                         "manifest_path": str(manifest_path),
-                         "categories": cats,
-                         "components_mapping": comp_map,
-                         "split": "train"}, f)
-
-        with open(_makedirs_for(test_data_path), "wb") as f:
-            pickle.dump({"data_path": str(out_root / "test"),
-                         "manifest_path": str(manifest_path),
-                         "categories": cats,
-                         "components_mapping": comp_map,
-                         "split": "test"}, f)
-
-        with open(_makedirs_for(val_data_path), "wb") as f:
-            pickle.dump({"data_path": str(out_root / "val"),
-                         "manifest_path": str(manifest_path),
-                         "categories": cats,
-                         "components_mapping": comp_map,
-                         "split": "val"}, f)
-
-        with open(_makedirs_for(dataset_manifest_path), "wb") as f:
-            pickle.dump(manifest, f)
-
-        with open(_makedirs_for(categories_json_path), "wb") as f:
-            pickle.dump(cats, f)
-
-        with open(_makedirs_for(components_mapping_path), "wb") as f:
-            pickle.dump(comp_map, f)
-
-        print("Output tree root:", out_root)
-        print("Manifest saved to:", manifest_path)
-        print("Categories saved to:", categories_path)
-        print("Components mapping saved to:", components_path)
-        print("Successfully processed and saved UI Components dataset.")
+        if __name__ == "__main__":
+            main()
         PY
 
-        # Execute the Python script (no arguments needed now)
-        python /tmp/process_dataset.py
+        # ---------- Run processor with explicit output paths ----------
+        python /tmp/process_dataset.py \
+          --src_root "${SRC_DIR}" \
+          --out_train        "$1" \
+          --out_val          "$5" \
+          --out_test         "$3" \
+          --out_manifest     "$7" \
+          --out_categories   "$9" \
+          --out_components   "${11}"
     args:
       - --train_data
-      - {outputPath: train_data}
+      - {outputPath: train_data}          # directory artifact
       - --test_data
-      - {outputPath: test_data}
+      - {outputPath: test_data}           # directory artifact
       - --val_data
-      - {outputPath: val_data}
+      - {outputPath: val_data}            # directory artifact
       - --dataset_manifest
-      - {outputPath: dataset_manifest}
+      - {outputPath: dataset_manifest}    # file (CSV)
       - --categories_json
-      - {outputPath: categories_json}
+      - {outputPath: categories_json}     # file (JSON)
       - --components_mapping
-      - {outputPath: components_mapping}
+      - {outputPath: components_mapping}  # file (JSON)
