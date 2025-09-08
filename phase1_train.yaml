@@ -261,14 +261,14 @@ implementation:
       - --val_data
       - {inputPath: val_data}       # directory
       - --test_data
-      - {inputPath: test_data}      # directory (optional)
+      - {inputPath: test_data}      # directory (optional if provided upstream)
       - --model_init
       - {inputPath: model_init}     # file
       - --model_meta
       - {inputPath: model_meta}     # JSON file
       - --best_model
-      - {outputPath: best_model}    # file (e.g., phase1_resnet50_best.pt)
+      - {outputPath: best_model}    # e.g., phase1_resnet50_best.pt
       - --label_maps
-      - {outputPath: label_maps}    # file (e.g., phase1_label_maps.json)
+      - {outputPath: label_maps}    # e.g., phase1_label_maps.json
       - --train_log
-      - {outputPath: train_log}     # file (e.g., phase1_train_log.json)
+      - {outputPath: train_log}     # e.g., phase1_train_log.json
