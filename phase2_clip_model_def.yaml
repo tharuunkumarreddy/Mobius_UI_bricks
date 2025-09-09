@@ -1,0 +1,123 @@
+name: phase2_clip_model_def
+description: Prepare Phase 2 CLIP config JSON. Uses train/val/test directories and optional categories.json to write phase2_model_config.json.
+
+inputs:
+  - { name: train_data,      type: Dataset, description: "Directory: train split (category/component/IMGs)" }
+  - { name: val_data,        type: Dataset, description: "Directory: val split (category/component/IMGs)" }
+  - { name: test_data,       type: Dataset, description: "Directory: test split (category/component/IMGs)" }
+  - { name: categories_json, type: Dataset, description: "Optional categories JSON; if omitted, defaults are used" }
+
+outputs:
+  - { name: model_config, type: Dataset, description: "phase2_model_config.json" }
+
+implementation:
+  container:
+    image: python:3.9
+    command:
+      - bash
+      - -ec
+      - |
+        set -euo pipefail
+
+        # -- Build a temporary dataset_root with symlinks to the three splits --
+        DATASET_ROOT="/tmp/phase2_dataset_root"
+        mkdir -p "$DATASET_ROOT"
+
+        # Positional args from KFP (see args: mapping below)
+        TRAIN_DIR="$1"
+        VAL_DIR="$3"
+        TEST_DIR="$5"
+        CATS_PATH="${7:-}"
+        OUT_FILE="$9"
+
+        ln -s "$TRAIN_DIR" "$DATASET_ROOT/train"
+        ln -s "$VAL_DIR"   "$DATASET_ROOT/val"
+        ln -s "$TEST_DIR"  "$DATASET_ROOT/test"
+
+        OUT_DIR="$(dirname "$OUT_FILE")"
+        mkdir -p "$OUT_DIR"
+
+        # --- Write the provided Python to disk ---
+        cat > /tmp/phase2_clip_model_def.py <<'PY'
+        #!/usr/bin/env python3
+        # phase2_clip_model_def.py
+        import argparse, json
+        from pathlib import Path
+
+        DEFAULT_CATEGORIES = [
+            "input_forms", "buttons_actions", "navigation", "content_display",
+            "feedback_status", "layout_structure", "interactive_elements", "visual_enhancements"
+        ]
+
+        def main():
+            ap = argparse.ArgumentParser()
+            ap.add_argument("--dataset_root", type=Path, default="/kaggle/working/")
+            ap.add_argument("--out_dir", type=Path, default="/kaggle/working/")
+            ap.add_argument("--clip_model_name", type=str, default="ViT-B/32")
+            ap.add_argument("--categories_json", type=Path, default=None)
+            ap.add_argument("--batch_size", type=int, default=16)
+            ap.add_argument("--epochs", type=int, default=15)
+            ap.add_argument("--lr_head", type=float, default=1e-3)
+            ap.add_argument("--lr_backbone", type=float, default=1e-5)
+            ap.add_argument("--weight_decay", type=float, default=1e-4)
+            args, _ = ap.parse_known_args()
+
+            args.out_dir.mkdir(parents=True, exist_ok=True)
+
+            if args.categories_json and Path(args.categories_json).exists():
+                categories = json.loads(Path(args.categories_json).read_text())
+            else:
+                categories = DEFAULT_CATEGORIES
+
+            cfg = {
+                "dataset_root": str(args.dataset_root),
+                "clip_model_name": args.clip_model_name,
+                "categories": categories,
+                "batch_size": args.batch_size,
+                "epochs": args.epochs,
+                "lr_head": args.lr_head,
+                "lr_backbone": args.lr_backbone,
+                "weight_decay": args.weight_decay,
+                "mean": [0.48145466, 0.4578275, 0.40821073],
+                "std":  [0.26862954, 0.26130258, 0.27577711]
+            }
+
+            out_path = args.out_dir / "phase2_model_config.json"
+            out_path.write_text(json.dumps(cfg, indent=2))
+            print("Saved:", out_path)
+
+        if __name__ == "__main__":
+            main()
+        PY
+        chmod +x /tmp/phase2_clip_model_def.py
+
+        # Build optional categories flag only if the file exists and is non-empty
+        CATS_ARG=()
+        if [ -n "${CATS_PATH:-}" ] && [ -s "${CATS_PATH:-}" ]; then
+          CATS_ARG=(--categories_json "$CATS_PATH")
+        fi
+
+        # Run the script
+        python3 /tmp/phase2_clip_model_def.py \
+          --dataset_root "$DATASET_ROOT" \
+          --out_dir "$OUT_DIR" \
+          "${CATS_ARG[@]}"
+
+        # Move the generated file to the exact output path expected by KFP
+        if [ -f "$OUT_DIR/phase2_model_config.json" ]; then
+          mv "$OUT_DIR/phase2_model_config.json" "$OUT_FILE"
+        else
+          echo "ERROR: Expected config not found at $OUT_DIR/phase2_model_config.json" >&2
+          exit 1
+        fi
+    args:
+      - --train_data
+      - {inputPath: train_data}
+      - --val_data
+      - {inputPath: val_data}
+      - --test_data
+      - {inputPath: test_data}
+      - --categories_json
+      - {inputPath: categories_json}
+      - --model_config
+      - {outputPath: model_config}
