@@ -1,23 +1,22 @@
 name: phase2_clip_train
-description: Train specialized CLIP heads per category using the dataset splits and the Phase 2 config. Emits one best .pt per category and a JSON of validation results.
+description: Train specialized CLIP classification heads per category using dataset_root and phase2_model_config.json. Produces per-category *_clip_best.pt and phase2_training_results.json.
 
 inputs:
-  - { name: train_data,   type: Dataset, description: "Directory: train split (category/component/IMGs)" }
-  - { name: val_data,     type: Dataset, description: "Directory: val split (category/component/IMGs)" }
-  - { name: test_data,    type: Dataset, description: "Directory: test split (category/component/IMGs)" }
+  - { name: train_data, type: Dataset, description: "Directory: train split (category/component/IMGs)" }
+  - { name: val_data,   type: Dataset, description: "Directory: val split (category/component/IMGs)" }
+  - { name: test_data,  type: Dataset, description: "Directory: test split (category/component/IMGs)" }
   - { name: model_config, type: Dataset, description: "phase2_model_config.json from phase2_clip_model_def" }
-  - { name: num_workers,  type: Integer, default: '0', description: "DataLoader workers (0 recommended on K8s to avoid /dev/shm errors)" }
 
 outputs:
-  - { name: buttons_actions_clip_best,     type: Model,   description: "Best CLIP model checkpoint for 'buttons_actions'" }
-  - { name: content_display_clip_best,     type: Model,   description: "Best CLIP model checkpoint for 'content_display'" }
-  - { name: feedback_status_clip_best,     type: Model,   description: "Best CLIP model checkpoint for 'feedback_status'" }
-  - { name: input_forms_clip_best,         type: Model,   description: "Best CLIP model checkpoint for 'input_forms'" }
-  - { name: interactive_elements_clip_best, type: Model,  description: "Best CLIP model checkpoint for 'interactive_elements'" }
-  - { name: layout_structure_clip_best,    type: Model,   description: "Best CLIP model checkpoint for 'layout_structure'" }
-  - { name: navigation_clip_best,          type: Model,   description: "Best CLIP model checkpoint for 'navigation'" }
-  - { name: visual_enhancements_clip_best, type: Model,   description: "Best CLIP model checkpoint for 'visual_enhancements'" }
-  - { name: training_results,              type: Dataset, description: "phase2_training_results.json (per-category best val acc)" }
+  - { name: buttons_actions_clip_best,    type: Model,   description: "buttons_actions_clip_best.pt" }
+  - { name: content_display_clip_best,    type: Model,   description: "content_display_clip_best.pt" }
+  - { name: feedback_status_clip_best,    type: Model,   description: "feedback_status_clip_best.pt" }
+  - { name: input_forms_clip_best,        type: Model,   description: "input_forms_clip_best.pt" }
+  - { name: interactive_elements_clip_best, type: Model, description: "interactive_elements_clip_best.pt" }
+  - { name: layout_structure_clip_best,   type: Model,   description: "layout_structure_clip_best.pt" }
+  - { name: navigation_clip_best,         type: Model,   description: "navigation_clip_best.pt" }
+  - { name: visual_enhancements_clip_best, type: Model,  description: "visual_enhancements_clip_best.pt" }
+  - { name: phase2_training_results,      type: Dataset, description: "phase2_training_results.json" }
 
 implementation:
   container:
@@ -28,298 +27,276 @@ implementation:
       - |
         set -euo pipefail
 
-        # ---- Deps ----
+        # --- System & Python deps ---
+        apt-get update -y && apt-get install -y git
         python -m pip install --no-cache-dir --upgrade pip
-        python -m pip install --no-cache-dir \
-          torch torchvision pillow ftfy regex tqdm \
-          --index-url https://download.pytorch.org/whl/cpu
+        python -m pip install --no-cache-dir torch torchvision pillow --index-url https://download.pytorch.org/whl/cpu
+        python -m pip install --no-cache-dir ftfy regex tqdm
         python -m pip install --no-cache-dir git+https://github.com/openai/CLIP.git
 
-        # ---- Parse CLI-style args passed by KFP ----
-        TRAIN_DIR=""
-        VAL_DIR=""
-        TEST_DIR=""
-        MODEL_CONFIG=""
-        NUM_WORKERS="0"
-        OUT_BUTTONS=""
-        OUT_CONTENT=""
-        OUT_FEEDBACK=""
-        OUT_INPUT=""
-        OUT_INTERACTIVE=""
-        OUT_LAYOUT=""
-        OUT_NAV=""
-        OUT_VISUAL=""
-        OUT_RESULTS=""
+        # --- Gather KFP-mapped paths (positional from args below) ---
+        TRAIN_DIR="$1"
+        VAL_DIR="$3"
+        TEST_DIR="$5"
+        CONFIG_PATH="$7"
 
-        while (( "$#" )); do
-          case "$1" in
-            --train_data) TRAIN_DIR="$2"; shift 2;;
-            --val_data) VAL_DIR="$2"; shift 2;;
-            --test_data) TEST_DIR="$2"; shift 2;;
-            --model_config) MODEL_CONFIG="$2"; shift 2;;
-            --num_workers) NUM_WORKERS="$2"; shift 2;;
-            --buttons_actions_model) OUT_BUTTONS="$2"; shift 2;;
-            --content_display_model) OUT_CONTENT="$2"; shift 2;;
-            --feedback_status_model) OUT_FEEDBACK="$2"; shift 2;;
-            --input_forms_model) OUT_INPUT="$2"; shift 2;;
-            --interactive_elements_model) OUT_INTERACTIVE="$2"; shift 2;;
-            --layout_structure_model) OUT_LAYOUT="$2"; shift 2;;
-            --navigation_model) OUT_NAV="$2"; shift 2;;
-            --visual_enhancements_model) OUT_VISUAL="$2"; shift 2;;
-            --training_results) OUT_RESULTS="$2"; shift 2;;
-            *) shift;;
-          esac
-        done
+        OUT_BUTTONS="$9"
+        OUT_CONTENT="${11}"
+        OUT_FEEDBACK="${13}"
+        OUT_INPUT="${15}"
+        OUT_INTERACTIVE="${17}"
+        OUT_LAYOUT="${19}"
+        OUT_NAV="${21}"
+        OUT_VISUAL="${23}"
+        OUT_RESULTS="${25}"
 
-        # ---- Build a dataset_root for this container and patch the config to point to it ----
+        # --- Build a temporary dataset_root with symlinks ---
         DATASET_ROOT="/tmp/phase2_dataset_root"
         mkdir -p "$DATASET_ROOT"
         ln -s "$TRAIN_DIR" "$DATASET_ROOT/train"
         ln -s "$VAL_DIR"   "$DATASET_ROOT/val"
         ln -s "$TEST_DIR"  "$DATASET_ROOT/test"
 
-        # Patch model_config's dataset_root so training reads the correct paths in this container
-        python - "$MODEL_CONFIG" "$DATASET_ROOT" <<'PYCONF'
-import json, sys
-p = sys.argv[1]; root = sys.argv[2]
-cfg = json.loads(open(p).read())
-cfg["dataset_root"] = root
-open(p, "w").write(json.dumps(cfg, indent=2))
-print("Patched dataset_root ->", root)
-PYCONF
-
-        # ---- Write the provided training script to disk (minus notebook magics) ----
-        cat > /tmp/phase2_clip_train.py <<'PY'
-#!/usr/bin/env python3
-import argparse, json, time
-from pathlib import Path
-from typing import Dict, List
-
-import torch, torch.nn as nn, torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-from PIL import Image
-import clip  # from openai/CLIP
-
-ALLOWED = {".jpg", ".jpeg", ".png", ".webp"}
-
-def discover_components_in_category(data_dir: Path, category: str, split: str = "train"):
-    category_path = data_dir / split / category
-    if not category_path.exists():
-        print(f"Warning: Category path does not exist: {category_path}")
-        return []
-    comps = [item.name for item in category_path.iterdir() if item.is_dir()]
-    return sorted(comps)
-
-def get_all_components_mapping(data_dir: Path, categories: List[str]):
-    components_mapping: Dict[str, List[str]] = {}
-    for category in categories:
-        components = discover_components_in_category(data_dir, category, "train")
-        if components:
-            components_mapping[category] = components
-        else:
-            print(f"Warning: No components found for category {category}")
-    return components_mapping
-
-class CategoryComponentDataset(Dataset):
-    def __init__(self, root: Path, category: str, components: List[str], split: str = "train", transform=None):
-        self.transform = transform
-        self.category = category
-        self.split = split
-        self.components = components
-        self.component_to_idx = {comp: idx for idx, comp in enumerate(self.components)}
-        self.idx_to_component = {idx: comp for comp, idx in self.component_to_idx.items()}
-        self.samples = []
-        category_folder = root / split / category
-        if not category_folder.exists():
-            raise FileNotFoundError(f"Category folder not found: {category_folder}")
-        for comp in self.components:
-            component_dir = category_folder / comp
-            if component_dir.exists():
-                for img_path in component_dir.iterdir():
-                    if img_path.suffix.lower() in ALLOWED:
-                        self.samples.append((img_path, self.component_to_idx[comp]))
-        if len(self.samples) == 0:
-            raise ValueError(f"No samples found for {category} in {split} split")
-
-    def __len__(self): return len(self.samples)
-
-    def __getitem__(self, idx):
-        img_path, label = self.samples[idx]
-        try:
-            img = Image.open(img_path).convert("RGB")
-        except Exception:
-            img = Image.new('RGB', (224, 224), color='black')
-        if self.transform:
-            img = self.transform(img)
-        return img, label
-
-def evaluate_model(model, head, data_loader, device):
-    model.eval(); head.eval()
-    correct = 0; total = 0
-    with torch.no_grad():
-        for imgs, labels in data_loader:
-            imgs, labels = imgs.to(device), labels.to(device)
-            feats = model.encode_image(imgs)
-            feats = feats / feats.norm(dim=-1, keepdim=True)
-            logits = head(feats)
-            _, pred = torch.max(logits.data, 1)
-            total += labels.size(0)
-            correct += (pred == labels).sum().item()
-    return 100.0 * (correct / total) if total > 0 else 0.0
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset_root", type=Path, default="/kaggle/working/")
-    ap.add_argument("--config", type=Path, default="/kaggle/working/phase2_model_config.json")
-    ap.add_argument("--out_dir", type=Path, default="/kaggle/working/phase2_output")
-    ap.add_argument("--num_workers", type=int, default=2)
-    args, _ = ap.parse_known_args()
-
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-
-    if not args.config.exists():
-        print(f"Error: Config file not found at {args.config}")
-        return
-    
-    cfg = json.loads(Path(args.config).read_text())
-    DATA_DIR = Path(cfg["dataset_root"])
-    BATCH_SIZE = int(cfg["batch_size"])
-    EPOCHS = int(cfg["epochs"])
-    LR_HEAD = float(cfg["lr_head"])
-    LR_BACKBONE = float(cfg["lr_backbone"])
-    WEIGHT_DECAY = float(cfg["weight_decay"])
-    CLIP_MODEL_NAME = cfg["clip_model_name"]
-    CATEGORIES = cfg["categories"]
-    MEAN, STD = cfg["mean"], cfg["std"]
-
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {DEVICE}")
-
-    COMPONENTS = get_all_components_mapping(DATA_DIR, CATEGORIES)
-    results: Dict[str, float] = {}
-
-    for category in CATEGORIES:
-        comps = COMPONENTS.get(category, [])
-        if not comps:
-            print(f"Skipping {category} - no components found")
-            results[category] = 0.0
-            continue
-
-        print(f"\n==== TRAINING CATEGORY: {category} ({len(comps)} components) ====")
-        
-        model, _ = clip.load(CLIP_MODEL_NAME, device=DEVICE)
-        model.float()
-
-        train_tf = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=MEAN, std=STD)
-        ])
-        val_tf = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=MEAN, std=STD)
-        ])
-
-        train_ds = CategoryComponentDataset(DATA_DIR, category, comps, "train", train_tf)
-        val_ds   = CategoryComponentDataset(DATA_DIR, category, comps, "val",   val_tf)
-        train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
-                                  num_workers=args.num_workers, pin_memory=True)
-        val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
-                                  num_workers=args.num_workers, pin_memory=True)
-
-        feature_dim = model.visual.output_dim
-        head = nn.Sequential(nn.Dropout(0.1), nn.Linear(feature_dim, len(comps))).to(DEVICE)
-
-        optimizer = optim.AdamW([
-            {"params": head.parameters(), "lr": LR_HEAD},
-            {"params": model.visual.parameters(), "lr": LR_BACKBONE}
-        ], weight_decay=WEIGHT_DECAY)
-        criterion = nn.CrossEntropyLoss()
-
-        best_val_acc = 0.0
-        best_model_path = args.out_dir / f"{category.lower()}_clip_best.pt"
-
-        for epoch in range(1, EPOCHS + 1):
-            model.train(); head.train()
-            running_loss, correct, total = 0.0, 0, 0
-            t0 = time.time()
-            for i, (imgs, labels) in enumerate(train_loader):
-                imgs, labels = imgs.to(DEVICE), labels.to(DEVICE)
-                optimizer.zero_grad()
-                feats = model.encode_image(imgs)
-                feats = feats / feats.norm(dim=-1, keepdim=True)
-                logits = head(feats)
-                loss = criterion(logits, labels)
-                loss.backward()
-                optimizer.step()
-
-                running_loss += loss.item()
-                _, pred = torch.max(logits.data, 1)
-                total += labels.size(0)
-                correct += (pred == labels).sum().item()
-                if (i + 1) % 10 == 0:
-                    print(f"  Batch {i+1}/{len(train_loader)} | Loss: {loss.item():.4f}")
-
-            train_acc = 100.0 * (correct / total) if total else 0.0
-            val_acc = evaluate_model(model, head, val_loader, DEVICE)
-            print(f"Epoch {epoch:02d}/{EPOCHS} | Train Loss: {running_loss/max(1,len(train_loader)):.4f} "
-                  f"| Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}% | {time.time()-t0:.1f}s")
-
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                save_dict = {
-                    "clip_model_state": model.state_dict(),
-                    "head_state": head.state_dict(),
-                    "component_to_idx": train_ds.component_to_idx,
-                    "idx_to_component": train_ds.idx_to_component,
-                    "components": train_ds.components,
-                    "category": category,
-                    "val_acc": val_acc
-                }
-                torch.save(save_dict, best_model_path)
-                print(f"  ✓ New best saved: {best_model_path} (val {val_acc:.2f}%)")
-
-        results[category] = best_val_acc
-
-    (args.out_dir / "phase2_training_results.json").write_text(json.dumps(results, indent=2))
-    print("Results:", results)
-
-if __name__ == "__main__":
-    main()
-PY
-        chmod +x /tmp/phase2_clip_train.py
-
-        # ---- Run training ----
-        OUT_DIR="/tmp/phase2_out"
+        # --- Prepare output staging dir ---
+        OUT_DIR="/tmp/phase2_output"
         mkdir -p "$OUT_DIR"
 
+        # --- Write your Python script to disk (unchanged logic, no shell '!' lines) ---
+        cat > /tmp/phase2_clip_train.py <<'PY'
+        #!/usr/bin/env python3
+        import argparse, json, time
+        from pathlib import Path
+        from typing import Dict, List
+
+        import torch, torch.nn as nn, torch.optim as optim
+        from torch.utils.data import Dataset, DataLoader
+        from torchvision import transforms
+        from PIL import Image
+        import clip
+
+        ALLOWED = {".jpg", ".jpeg", ".png", ".webp"}
+
+        def discover_components_in_category(data_dir: Path, category: str, split: str = "train"):
+            category_path = data_dir / split / category
+            if not category_path.exists():
+                print(f"Warning: Category path does not exist: {category_path}")
+                return []
+            comps = [item.name for item in category_path.iterdir() if item.is_dir()]
+            return sorted(comps)
+
+        def get_all_components_mapping(data_dir: Path, categories: List[str]):
+            components_mapping: Dict[str, List[str]] = {}
+            for category in categories:
+                components = discover_components_in_category(data_dir, category, "train")
+                if components:
+                    components_mapping[category] = components
+                else:
+                    print(f"Warning: No components found for category {category}")
+            return components_mapping
+
+        class CategoryComponentDataset(Dataset):
+            def __init__(self, root: Path, category: str, components: List[str], split: str = "train", transform=None):
+                self.transform = transform
+                self.category = category
+                self.split = split
+                self.components = components
+                self.component_to_idx = {comp: idx for idx, comp in enumerate(self.components)}
+                self.idx_to_component = {idx: comp for comp, idx in self.component_to_idx.items()}
+                self.samples = []
+                category_folder = root / split / category
+                if not category_folder.exists():
+                    raise FileNotFoundError(f"Category folder not found: {category_folder}")
+                for comp in self.components:
+                    component_dir = category_folder / comp
+                    if component_dir.exists():
+                        for img_path in component_dir.iterdir():
+                            if img_path.suffix.lower() in ALLOWED:
+                                self.samples.append((img_path, self.component_to_idx[comp]))
+                if len(self.samples) == 0:
+                    raise ValueError(f"No samples found for {category} in {split} split")
+
+            def __len__(self): return len(self.samples)
+
+            def __getitem__(self, idx):
+                img_path, label = self.samples[idx]
+                try:
+                    img = Image.open(img_path).convert("RGB")
+                except Exception:
+                    img = Image.new('RGB', (224, 224), color='black')
+                if self.transform:
+                    img = self.transform(img)
+                return img, label
+
+        def evaluate_model(model, head, data_loader, device):
+            model.eval(); head.eval()
+            correct = 0; total = 0
+            with torch.no_grad():
+                for imgs, labels in data_loader:
+                    imgs, labels = imgs.to(device), labels.to(device)
+                    feats = model.encode_image(imgs)
+                    feats = feats / feats.norm(dim=-1, keepdim=True)
+                    logits = head(feats)
+                    _, pred = torch.max(logits.data, 1)
+                    total += labels.size(0)
+                    correct += (pred == labels).sum().item()
+            return 100.0 * (correct / total) if total > 0 else 0.0
+
+        def main():
+            ap = argparse.ArgumentParser()
+            ap.add_argument("--dataset_root", type=Path, default="/kaggle/working/")
+            ap.add_argument("--config", type=Path, default="/kaggle/working/phase2_model_config.json")
+            ap.add_argument("--out_dir", type=Path, default="/kaggle/working/phase2_output")
+            ap.add_argument("--num_workers", type=int, default=2)
+            args, _ = ap.parse_known_args()
+
+            args.out_dir.mkdir(parents=True, exist_ok=True)
+
+            if not args.config.exists():
+                print(f"Error: Config file not found at {args.config}")
+                print("Please ensure phase2_model_config.json exists in the working directory")
+                return
+
+            cfg = json.loads(Path(args.config).read_text())
+
+            DATA_DIR = Path(cfg["dataset_root"])
+            BATCH_SIZE = int(cfg["batch_size"])
+            EPOCHS = int(cfg["epochs"])
+            LR_HEAD = float(cfg["lr_head"])
+            LR_BACKBONE = float(cfg["lr_backbone"])
+            WEIGHT_DECAY = float(cfg["weight_decay"])
+            CLIP_MODEL_NAME = cfg["clip_model_name"]
+            CATEGORIES = cfg["categories"]
+            MEAN, STD = cfg["mean"], cfg["std"]
+
+            DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"Using device: {DEVICE}")
+
+            COMPONENTS = get_all_components_mapping(DATA_DIR, CATEGORIES)
+            results: Dict[str, float] = {}
+
+            for category in CATEGORIES:
+                comps = COMPONENTS.get(category, [])
+                if not comps:
+                    print(f"Skipping {category} - no components found")
+                    results[category] = 0.0
+                    continue
+
+                print(f"\\n==== TRAINING CATEGORY: {category} ({len(comps)} components) ====")
+
+                model, _ = clip.load(CLIP_MODEL_NAME, device=DEVICE)
+                model.float()
+
+                train_tf = transforms.Compose([
+                    transforms.Resize((224, 224)),
+                    transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=MEAN, std=STD)
+                ])
+                val_tf = transforms.Compose([
+                    transforms.Resize((224, 224)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=MEAN, std=STD)
+                ])
+
+                train_ds = CategoryComponentDataset(DATA_DIR, category, comps, "train", train_tf)
+                val_ds   = CategoryComponentDataset(DATA_DIR, category, comps, "val",   val_tf)
+                train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
+                                          num_workers=args.num_workers, pin_memory=True)
+                val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False,
+                                          num_workers=args.num_workers, pin_memory=True)
+
+                feature_dim = model.visual.output_dim
+                head = nn.Sequential(nn.Dropout(0.1), nn.Linear(feature_dim, len(comps))).to(DEVICE)
+
+                optimizer = optim.AdamW([
+                    {"params": head.parameters(), "lr": LR_HEAD},
+                    {"params": model.visual.parameters(), "lr": LR_BACKBONE}
+                ], weight_decay=WEIGHT_DECAY)
+                criterion = nn.CrossEntropyLoss()
+
+                best_val_acc = 0.0
+                best_model_path = args.out_dir / f"{category.lower()}_clip_best.pt"
+
+                for epoch in range(1, EPOCHS + 1):
+                    model.train(); head.train()
+                    running_loss, correct, total = 0.0, 0, 0
+                    t0 = time.time()
+                    for i, (imgs, labels) in enumerate(train_loader):
+                        imgs, labels = imgs.to(DEVICE), labels.to(DEVICE)
+                        optimizer.zero_grad()
+                        feats = model.encode_image(imgs)
+                        feats = feats / feats.norm(dim=-1, keepdim=True)
+                        logits = head(feats)
+                        loss = criterion(logits, labels)
+                        loss.backward()
+                        optimizer.step()
+
+                        running_loss += loss.item()
+                        _, pred = torch.max(logits.data, 1)
+                        total += labels.size(0)
+                        correct += (pred == labels).sum().item()
+                        if (i + 1) % 10 == 0:
+                            print(f"  Batch {i+1}/{len(train_loader)} | Loss: {loss.item():.4f}")
+
+                    train_acc = 100.0 * (correct / total) if total else 0.0
+                    val_acc = evaluate_model(model, head, val_loader, DEVICE)
+                    print(f"Epoch {epoch:02d}/{EPOCHS} | Train Loss: {running_loss/len(train_loader):.4f} "
+                          f"| Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}% | {time.time()-t0:.1f}s")
+
+                    if val_acc > best_val_acc:
+                        best_val_acc = val_acc
+                        save_dict = {
+                            "clip_model_state": model.state_dict(),
+                            "head_state": head.state_dict(),
+                            "component_to_idx": train_ds.component_to_idx,
+                            "idx_to_component": train_ds.idx_to_component,
+                            "components": train_ds.components,
+                            "category": category,
+                            "val_acc": val_acc
+                        }
+                        torch.save(save_dict, best_model_path)
+                        print(f"  ✓ New best saved: {best_model_path} (val {val_acc:.2f}%)")
+
+                results[category] = best_val_acc
+
+            (args.out_dir / "phase2_training_results.json").write_text(json.dumps(results, indent=2))
+            print("Results:", results)
+
+        if __name__ == "__main__":
+            main()
+        PY
+        chmod +x /tmp/phase2_clip_train.py
+
+        # --- Run training (override workers to 0 for K8s shm safety) ---
         python3 /tmp/phase2_clip_train.py \
-          --config "$MODEL_CONFIG" \
           --dataset_root "$DATASET_ROOT" \
+          --config "$CONFIG_PATH" \
           --out_dir "$OUT_DIR" \
-          --num_workers "$NUM_WORKERS"
+          --num_workers 0
 
-        # ---- Stage outputs to KFP artifact paths ----
-        mkdir -p \
-          "$(dirname "$OUT_BUTTONS")" "$(dirname "$OUT_CONTENT")" "$(dirname "$OUT_FEEDBACK")" \
-          "$(dirname "$OUT_INPUT")" "$(dirname "$OUT_INTERACTIVE")" "$(dirname "$OUT_LAYOUT")" \
-          "$(dirname "$OUT_NAV")" "$(dirname "$OUT_VISUAL")" "$(dirname "$OUT_RESULTS")"
+        # --- Collect/move artifacts to KFP output paths ---
+        move_or_touch() {
+          local src="$1"; local dst="$2"
+          mkdir -p "$(dirname "$dst")"
+          if [ -f "$src" ]; then
+            mv "$src" "$dst"
+          else
+            echo "WARNING: expected artifact missing: $src; creating empty file at $dst" >&2
+            : > "$dst"
+          fi
+        }
 
-        cp "$OUT_DIR/buttons_actions_clip_best.pt"     "$OUT_BUTTONS"
-        cp "$OUT_DIR/content_display_clip_best.pt"     "$OUT_CONTENT"
-        cp "$OUT_DIR/feedback_status_clip_best.pt"     "$OUT_FEEDBACK"
-        cp "$OUT_DIR/input_forms_clip_best.pt"         "$OUT_INPUT"
-        cp "$OUT_DIR/interactive_elements_clip_best.pt" "$OUT_INTERACTIVE"
-        cp "$OUT_DIR/layout_structure_clip_best.pt"    "$OUT_LAYOUT"
-        cp "$OUT_DIR/navigation_clip_best.pt"          "$OUT_NAV"
-        cp "$OUT_DIR/visual_enhancements_clip_best.pt" "$OUT_VISUAL"
-        cp "$OUT_DIR/phase2_training_results.json"     "$OUT_RESULTS"
-
+        move_or_touch "$OUT_DIR/buttons_actions_clip_best.pt"      "$OUT_BUTTONS"
+        move_or_touch "$OUT_DIR/content_display_clip_best.pt"      "$OUT_CONTENT"
+        move_or_touch "$OUT_DIR/feedback_status_clip_best.pt"      "$OUT_FEEDBACK"
+        move_or_touch "$OUT_DIR/input_forms_clip_best.pt"          "$OUT_INPUT"
+        move_or_touch "$OUT_DIR/interactive_elements_clip_best.pt" "$OUT_INTERACTIVE"
+        move_or_touch "$OUT_DIR/layout_structure_clip_best.pt"     "$OUT_LAYOUT"
+        move_or_touch "$OUT_DIR/navigation_clip_best.pt"           "$OUT_NAV"
+        move_or_touch "$OUT_DIR/visual_enhancements_clip_best.pt"  "$OUT_VISUAL"
+        move_or_touch "$OUT_DIR/phase2_training_results.json"      "$OUT_RESULTS"
     args:
       - --train_data
       - {inputPath: train_data}
@@ -329,9 +306,6 @@ PY
       - {inputPath: test_data}
       - --model_config
       - {inputPath: model_config}
-      - --num_workers
-      - {inputValue: num_workers}
-
       - --buttons_actions_model
       - {outputPath: buttons_actions_clip_best}
       - --content_display_model
@@ -349,4 +323,4 @@ PY
       - --visual_enhancements_model
       - {outputPath: visual_enhancements_clip_best}
       - --training_results
-      - {outputPath: training_results}
+      - {outputPath: phase2_training_results}
