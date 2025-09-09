@@ -6,6 +6,7 @@ inputs:
   - { name: test_data,  type: Dataset, description: "Directory: test split (category/component/IMGs). Optional; used for final eval only." }
   - { name: model_init, type: Model,   description: "Initial model weights (.pt) from the model definition step." }
   - { name: model_meta, type: Dataset, description: "Model metadata JSON from the model definition step." }
+  - { name: epochs,     type: Integer, default: '1', description: "Number of training epochs (use 1 for a quick smoke test)" }
 outputs:
   - { name: best_model, type: Model,   description: "The best trained model weights (.pt file)." }
   - { name: label_maps, type: Dataset, description: "JSON mapping: {index: category}." }
@@ -25,7 +26,7 @@ implementation:
       - -c
       - |
         #!/usr/bin/env python3
-        import argparse, json, random, time, os
+        import argparse, json, random, time
         from pathlib import Path
 
         import numpy as np
@@ -39,7 +40,6 @@ implementation:
 
         IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
-        # ------------------- Utilities -------------------
         def set_seed(seed=42):
             random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
             if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
@@ -86,7 +86,6 @@ implementation:
             return (preds == targets).float().mean().item()
 
         def _strip_neg1(x, y):
-            # Filter out rows with y == -1 (failed decode)
             if isinstance(y, torch.Tensor):
                 mask = y != -1
                 if mask.ndim > 0 and (~mask).any():
@@ -112,7 +111,6 @@ implementation:
                 return float("inf"), 0.0
             return running_loss / n, running_acc / n
 
-        # ------------------- Main -------------------
         def main():
             ap = argparse.ArgumentParser()
             ap.add_argument('--train_data', required=True)
@@ -123,21 +121,19 @@ implementation:
             ap.add_argument('--best_model', required=True)
             ap.add_argument('--label_maps', required=True)
             ap.add_argument('--train_log',  required=True)
-            ap.add_argument('--epochs', type=int, default=10)
+            ap.add_argument('--epochs', type=int, default=10)  # stays here; overridden by CLI
             ap.add_argument('--batch_size', type=int, default=32)
             ap.add_argument('--lr', type=float, default=3e-4)
             ap.add_argument('--weight_decay', type=float, default=1e-4)
-            ap.add_argument('--num_workers', type=int, default=0)  # <<< avoid shm
+            ap.add_argument('--num_workers', type=int, default=0)  # keep 0 to avoid /dev/shm issues
             ap.add_argument('--seed', type=int, default=42)
             args = ap.parse_args()
 
             set_seed(args.seed)
 
-            # Prepare output dirs
             for p in [args.best_model, args.label_maps, args.train_log]:
                 Path(p).parent.mkdir(parents=True, exist_ok=True)
 
-            # Directories (from loader artifacts)
             train_dir = Path(args.train_data)
             val_dir   = Path(args.val_data)
             test_dir  = Path(args.test_data) if args.test_data else None
@@ -146,13 +142,11 @@ implementation:
             print(f"Validation data path: {val_dir}")
             if test_dir: print(f"Test data path: {test_dir}")
 
-            # Quick structure sanity: expect split/category/component/image
             if not train_dir.exists() or not any(train_dir.glob("*/*/*")):
                 raise RuntimeError(f"Train split appears empty at: {train_dir}")
             if not val_dir.exists() or not any(val_dir.glob("*/*/*")):
                 raise RuntimeError(f"Val split appears empty at: {val_dir}")
 
-            # Metadata JSON
             meta = json.loads(Path(args.model_meta).read_text())
             image_size = int(meta["image_size"])
             mean, std  = meta["mean"], meta["std"]
@@ -160,7 +154,6 @@ implementation:
             category_to_idx = {c: i for i, c in enumerate(categories)}
             idx_to_category = {i: c for c, i in category_to_idx.items()}
 
-            # Transforms
             train_tfms = transforms.Compose([
                 transforms.Resize((image_size, image_size)),
                 transforms.RandomHorizontalFlip(p=0.5),
@@ -176,12 +169,7 @@ implementation:
             ])
 
             device = torch.device("cpu")
-            # DataLoader kwargs tuned to avoid /dev/shm usage
-            nw = max(0, int(args.num_workers))
-            dl_common = dict(num_workers=nw, pin_memory=False, persistent_workers=False)
-            # prefetch_factor only valid when num_workers > 0; otherwise skip
-            if nw > 0:
-                dl_common["prefetch_factor"] = 1
+            dl_common = dict(num_workers=0, pin_memory=False, persistent_workers=False)
 
             train_ds = UICategoryDataset(train_dir, category_to_idx, transform=train_tfms, image_size=image_size)
             val_ds   = UICategoryDataset(val_dir,   category_to_idx, transform=eval_tfms,   image_size=image_size)
@@ -192,17 +180,14 @@ implementation:
             train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  **dl_common)
             val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, **dl_common)
 
-            # Optional test loader
             test_loader = None
             if test_dir and test_dir.exists() and any(test_dir.glob("*/*/*")):
                 test_ds = UICategoryDataset(test_dir, category_to_idx, transform=eval_tfms, image_size=image_size)
                 print(f"Found {len(test_ds)} test images")
                 test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, **dl_common)
 
-            # Model
             model = resnet50(weights=None)
             model.fc = nn.Sequential(nn.Dropout(p=0.2), nn.Linear(model.fc.in_features, len(categories)))
-            # Safe torch.load to silence FutureWarning, with fallback for older torch
             try:
                 state = torch.load(args.model_init, map_location="cpu", weights_only=True)
             except TypeError:
@@ -213,7 +198,6 @@ implementation:
             criterion = nn.CrossEntropyLoss(label_smoothing=0.05)
             optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-            # Train
             best_val_acc = 0.0
             for epoch in range(1, args.epochs + 1):
                 model.train()
@@ -244,7 +228,6 @@ implementation:
                     best_val_acc = val_acc
                     torch.save(model.state_dict(), args.best_model)
 
-            # Final (optional) test evaluation using best model
             test_acc = None
             if test_loader is not None:
                 best_state = torch.load(args.best_model, map_location="cpu")
@@ -252,10 +235,7 @@ implementation:
                 _, test_acc = evaluate(model, test_loader, device, criterion)
                 print(f"Final Test Acc: {test_acc:.4f}")
 
-            # Label map
             Path(args.label_maps).write_text(json.dumps(idx_to_category, indent=2))
-
-            # Log
             log = {"best_val_acc": best_val_acc}
             if test_acc is not None: log["test_acc"] = test_acc
             Path(args.train_log).write_text(json.dumps(log, indent=2))
@@ -264,18 +244,20 @@ implementation:
             main()
     args:
       - --train_data
-      - {inputPath: train_data}     # directory
+      - {inputPath: train_data}
       - --val_data
-      - {inputPath: val_data}       # directory
+      - {inputPath: val_data}
       - --test_data
-      - {inputPath: test_data}      # directory (optional if provided upstream)
+      - {inputPath: test_data}
       - --model_init
-      - {inputPath: model_init}     # file
+      - {inputPath: model_init}
       - --model_meta
-      - {inputPath: model_meta}     # JSON file
+      - {inputPath: model_meta}
       - --best_model
-      - {outputPath: best_model}    # e.g., phase1_resnet50_best.pt
+      - {outputPath: best_model}
       - --label_maps
-      - {outputPath: label_maps}    # e.g., phase1_label_maps.json
+      - {outputPath: label_maps}
       - --train_log
-      - {outputPath: train_log}     # e.g., phase1_train_log.json
+      - {outputPath: train_log}
+      - --epochs
+      - {inputValue: epochs}
