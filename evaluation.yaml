@@ -274,8 +274,8 @@ implementation:
       - {inputPath: navigation_model}
       - --visual_enhancements_model
       - {inputPath: visual_enhancements_model}
-
       - --phase1_metrics
       - {outputPath: phase1_metrics}
       - --phase2_metrics
       - {outputPath: phase2_metrics}
+
