@@ -1,0 +1,246 @@
+name: evaluation
+description: Evaluate trained models on test split. 
+             - Phase 1: Evaluate ResNet50 checkpoint on test set. 
+             - Phase 2: Evaluate per-category CLIP models on test set. 
+             Outputs phase1_test_metrics.json and phase2_eval_results.json.
+
+inputs:
+  - { name: train_data,   type: Dataset, description: "Directory: train split (category/component/IMGs)" }
+  - { name: val_data,     type: Dataset, description: "Directory: val split (category/component/IMGs)" }
+  - { name: test_data,    type: Dataset, description: "Directory: test split (category/component/IMGs)" }
+
+  - { name: phase1_model, type: Model,   description: "Best Phase 1 ResNet50 checkpoint (.pt)" }
+
+  - { name: buttons_actions_model,      type: Model, description: "Best CLIP model for buttons_actions" }
+  - { name: content_display_model,      type: Model, description: "Best CLIP model for content_display" }
+  - { name: feedback_status_model,      type: Model, description: "Best CLIP model for feedback_status" }
+  - { name: input_forms_model,          type: Model, description: "Best CLIP model for input_forms" }
+  - { name: interactive_elements_model, type: Model, description: "Best CLIP model for interactive_elements" }
+  - { name: layout_structure_model,     type: Model, description: "Best CLIP model for layout_structure" }
+  - { name: navigation_model,           type: Model, description: "Best CLIP model for navigation" }
+  - { name: visual_enhancements_model,  type: Model, description: "Best CLIP model for visual_enhancements" }
+
+outputs:
+  - { name: phase1_metrics, type: Dataset, description: "phase1_test_metrics.json" }
+  - { name: phase2_metrics, type: Dataset, description: "phase2_eval_results.json" }
+
+implementation:
+  container:
+    image: python:3.9
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        pip install torch torchvision pillow --index-url https://download.pytorch.org/whl/cpu
+        pip install git+https://github.com/openai/CLIP.git
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse, json
+        from pathlib import Path
+        import torch, torch.nn as nn
+        from torch.utils.data import DataLoader
+        from torchvision import transforms
+        from PIL import Image
+        import clip
+
+        IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+        # ----------------- Shared helpers -----------------
+        def list_images_under_category(category_dir: Path):
+            files = []
+            for comp_dir in category_dir.iterdir():
+                if comp_dir.is_dir():
+                    for f in comp_dir.iterdir():
+                        if f.is_file() and f.suffix.lower() in IMG_EXTS:
+                            files.append(f)
+            return files
+
+        # ----------------- Phase 1 eval -----------------
+        class UICategoryDataset(torch.utils.data.Dataset):
+            def __init__(self, split_root: Path, category_to_idx: dict, transform=None):
+                self.transform = transform
+                self.samples = []
+                for cat in sorted(category_to_idx.keys()):
+                    cat_dir = split_root / cat
+                    if not cat_dir.exists():
+                        continue
+                    for img_path in list_images_under_category(cat_dir):
+                        self.samples.append((img_path, category_to_idx[cat]))
+                if len(self.samples) == 0:
+                    raise RuntimeError(f"No images found under {split_root}.")
+
+            def __len__(self): return len(self.samples)
+            def __getitem__(self, idx):
+                path, y = self.samples[idx]
+                try:
+                    img = Image.open(path).convert("RGB")
+                except Exception:
+                    img = Image.new('RGB', (224, 224), color='black')
+                if self.transform: img = self.transform(img)
+                return img, y
+
+        def eval_phase1(test_dir: Path, ckpt_path: Path, out_json: Path):
+            if not ckpt_path.exists():
+                print("[Phase1] No checkpoint found; skipping.")
+                return
+            ckpt = torch.load(ckpt_path, map_location="cpu")
+            category_to_idx = ckpt["category_to_idx"]
+            idx_to_category = ckpt["idx_to_category"]
+            image_size = ckpt["image_size"]
+
+            from torchvision.models import resnet50, ResNet50_Weights
+            m = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+            m.fc = nn.Sequential(nn.Dropout(p=0.2), nn.Linear(m.fc.in_features, len(category_to_idx)))
+            m.load_state_dict(ckpt["model_state"], strict=True)
+
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            m.to(device)
+            weights = ResNet50_Weights.IMAGENET1K_V2
+            eval_tfms = transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=weights.transforms().mean, std=weights.transforms().std),
+            ])
+            test_ds = UICategoryDataset(test_dir, category_to_idx, transform=eval_tfms)
+            test_loader = DataLoader(test_ds, batch_size=32, shuffle=False)
+
+            criterion = nn.CrossEntropyLoss()
+            m.eval(); tot_loss, tot_acc, n = 0.0, 0.0, 0
+            with torch.no_grad():
+                for x, y in test_loader:
+                    x, y = x.to(device), y.to(device)
+                    logits = m(x)
+                    loss = criterion(logits, y)
+                    bs = y.size(0)
+                    tot_loss += loss.item() * bs
+                    tot_acc  += (logits.argmax(1) == y).float().sum().item()
+                    n += bs
+
+            metrics = {"loss": tot_loss / n, "acc": tot_acc / n, "num_examples": n,
+                       "num_classes": len(category_to_idx), "labels": idx_to_category}
+            out_json.write_text(json.dumps(metrics, indent=2))
+            print(f"[Phase1] Test accuracy: {tot_acc/n*100:.2f}% ({tot_acc}/{n})")
+
+        # ----------------- Phase 2 eval -----------------
+        class CategoryComponentDataset(torch.utils.data.Dataset):
+            def __init__(self, root: Path, category: str, components, split: str = "test", transform=None):
+                self.transform = transform
+                self.samples = []
+                self.component_to_idx = {c:i for i,c in enumerate(components)}
+                cat_dir = root / split / category
+                if not cat_dir.exists():
+                    raise FileNotFoundError(f"Category dir not found: {cat_dir}")
+                for comp in components:
+                    comp_dir = cat_dir / comp
+                    if not comp_dir.exists():
+                        continue
+                    for f in comp_dir.iterdir():
+                        if f.suffix.lower() in IMG_EXTS:
+                            self.samples.append((f, self.component_to_idx[comp]))
+                if not self.samples:
+                    raise RuntimeError(f"No samples for {category} in {split}/")
+
+            def __len__(self): return len(self.samples)
+            def __getitem__(self, idx):
+                p, y = self.samples[idx]
+                try:
+                    img = Image.open(p).convert("RGB")
+                except Exception:
+                    img = Image.new('RGB', (224,224), color='black')
+                if self.transform: img = self.transform(img)
+                return img, y
+
+        def eval_phase2(test_dir: Path, model_files: dict, out_json: Path):
+            MEAN=[0.48145466,0.4578275,0.40821073]; STD=[0.26862954,0.26130258,0.27577711]
+            tfm = transforms.Compose([transforms.Resize((224,224)), transforms.ToTensor(), transforms.Normalize(mean=MEAN, std=STD)])
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            results = {}
+            for cat, pt_path in model_files.items():
+                ckpt = torch.load(pt_path, map_location="cpu")
+                components = ckpt["components"]
+                model, _ = clip.load("ViT-B/32", device=device)
+                model.float()
+                head = nn.Sequential(nn.Dropout(0.1), nn.Linear(model.visual.output_dim, len(components))).to(device)
+                model.load_state_dict(ckpt["clip_model_state"], strict=True)
+                head.load_state_dict(ckpt["head_state"], strict=True)
+                try:
+                    ds = CategoryComponentDataset(test_dir.parent, cat, components, split="test", transform=tfm)
+                    dl = DataLoader(ds, batch_size=16, shuffle=False)
+                    correct=total=0
+                    with torch.no_grad():
+                        for x,y in dl:
+                            x,y=x.to(device),y.to(device)
+                            feats=model.encode_image(x)
+                            feats=feats/feats.norm(dim=-1,keepdim=True)
+                            logits=head(feats)
+                            _,pred=torch.max(logits.data,1)
+                            total+=y.size(0); correct+=(pred==y).sum().item()
+                    acc=100.0*correct/total if total else 0.0
+                    results[cat]={"acc_percent":acc,"num_examples":total,"num_components":len(components)}
+                except Exception as e:
+                    results[cat]={"acc_percent":0.0,"error":str(e)}
+            out_json.write_text(json.dumps(results, indent=2))
+
+        def main():
+            ap = argparse.ArgumentParser()
+            ap.add_argument("--train_data"); ap.add_argument("--val_data"); ap.add_argument("--test_data")
+            ap.add_argument("--phase1_model")
+            ap.add_argument("--buttons_actions_model"); ap.add_argument("--content_display_model")
+            ap.add_argument("--feedback_status_model"); ap.add_argument("--input_forms_model")
+            ap.add_argument("--interactive_elements_model"); ap.add_argument("--layout_structure_model")
+            ap.add_argument("--navigation_model"); ap.add_argument("--visual_enhancements_model")
+            ap.add_argument("--phase1_metrics"); ap.add_argument("--phase2_metrics")
+            args=ap.parse_args()
+
+            test_dir=Path(args.test_data)
+            eval_phase1(test_dir, Path(args.phase1_model), Path(args.phase1_metrics))
+            model_files={
+              "buttons_actions": Path(args.buttons_actions_model),
+              "content_display": Path(args.content_display_model),
+              "feedback_status": Path(args.feedback_status_model),
+              "input_forms": Path(args.input_forms_model),
+              "interactive_elements": Path(args.interactive_elements_model),
+              "layout_structure": Path(args.layout_structure_model),
+              "navigation": Path(args.navigation_model),
+              "visual_enhancements": Path(args.visual_enhancements_model)
+            }
+            eval_phase2(test_dir, model_files, Path(args.phase2_metrics))
+
+        if __name__=="__main__": main()
+
+    args:
+      - --train_data
+      - {inputPath: train_data}
+      - --val_data
+      - {inputPath: val_data}
+      - --test_data
+      - {inputPath: test_data}
+
+      - --phase1_model
+      - {inputPath: phase1_model}
+
+      - --buttons_actions_model
+      - {inputPath: buttons_actions_model}
+      - --content_display_model
+      - {inputPath: content_display_model}
+      - --feedback_status_model
+      - {inputPath: feedback_status_model}
+      - --input_forms_model
+      - {inputPath: input_forms_model}
+      - --interactive_elements_model
+      - {inputPath: interactive_elements_model}
+      - --layout_structure_model
+      - {inputPath: layout_structure_model}
+      - --navigation_model
+      - {inputPath: navigation_model}
+      - --visual_enhancements_model
+      - {inputPath: visual_enhancements_model}
+
+      - --phase1_metrics
+      - {outputPath: phase1_metrics}
+      - --phase2_metrics
+      - {outputPath: phase2_metrics}
