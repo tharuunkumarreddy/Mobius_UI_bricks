@@ -8,9 +8,7 @@ inputs:
   - { name: train_data,   type: Dataset, description: "Directory: train split (category/component/IMGs)" }
   - { name: val_data,     type: Dataset, description: "Directory: val split (category/component/IMGs)" }
   - { name: test_data,    type: Dataset, description: "Directory: test split (category/component/IMGs)" }
-
   - { name: phase1_model, type: Model,   description: "Best Phase 1 ResNet50 checkpoint (.pt)" }
-
   - { name: buttons_actions_model,      type: Model, description: "Best CLIP model for buttons_actions" }
   - { name: content_display_model,      type: Model, description: "Best CLIP model for content_display" }
   - { name: feedback_status_model,      type: Model, description: "Best CLIP model for feedback_status" }
@@ -219,10 +217,8 @@ implementation:
       - {inputPath: val_data}
       - --test_data
       - {inputPath: test_data}
-
       - --phase1_model
       - {inputPath: phase1_model}
-
       - --buttons_actions_model
       - {inputPath: buttons_actions_model}
       - --content_display_model
@@ -239,8 +235,8 @@ implementation:
       - {inputPath: navigation_model}
       - --visual_enhancements_model
       - {inputPath: visual_enhancements_model}
-
       - --phase1_metrics
       - {outputPath: phase1_metrics}
       - --phase2_metrics
       - {outputPath: phase2_metrics}
+
