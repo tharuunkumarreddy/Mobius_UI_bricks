@@ -34,7 +34,7 @@ implementation:
       - -u
       - -c
       - |
-        import argparse, json, time
+        import argparse, json
         from pathlib import Path
         from typing import Dict, List
         import torch, torch.nn as nn, torch.optim as optim
@@ -98,7 +98,7 @@ implementation:
         def main():
             ap = argparse.ArgumentParser()
             ap.add_argument("--train_data"); ap.add_argument("--val_data"); ap.add_argument("--test_data")
-            ap.add_argument("--model_config"); ap.add_argument("--out_dir")
+            ap.add_argument("--model_config")
             ap.add_argument("--buttons_actions_model"); ap.add_argument("--content_display_model")
             ap.add_argument("--feedback_status_model"); ap.add_argument("--input_forms_model")
             ap.add_argument("--interactive_elements_model"); ap.add_argument("--layout_structure_model")
@@ -106,7 +106,6 @@ implementation:
             ap.add_argument("--training_results")
             args = ap.parse_args()
 
-            out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
             cfg = json.loads(Path(args.model_config).read_text())
             DATA_DIR, BATCH_SIZE, EPOCHS = Path(cfg["dataset_root"]), int(cfg["batch_size"]), int(cfg["epochs"])
             LR_H, LR_B, WD = float(cfg["lr_head"]), float(cfg["lr_backbone"]), float(cfg["weight_decay"])
@@ -160,7 +159,7 @@ implementation:
                     val_acc=evaluate_model(model,head,val_loader,DEVICE)
                     if val_acc>best:
                         best=val_acc
-                        torch.save({
+                        save_dict={
                             "clip_model_state":model.state_dict(),
                             "head_state":head.state_dict(),
                             "component_to_idx":train_ds.component_to_idx,
@@ -168,9 +167,14 @@ implementation:
                             "components":train_ds.component_to_idx,
                             "category":cat,
                             "val_acc":val_acc
-                        }, path_map[cat])
+                        }
+                        # ✅ ensure output dir exists
+                        Path(path_map[cat]).parent.mkdir(parents=True, exist_ok=True)
+                        torch.save(save_dict, path_map[cat])
                 results[cat]=best
 
+            # ✅ ensure training_results dir exists
+            Path(args.training_results).parent.mkdir(parents=True, exist_ok=True)
             Path(args.training_results).write_text(json.dumps(results,indent=2))
 
         if __name__=="__main__": main()
@@ -184,8 +188,6 @@ implementation:
       - {inputPath: test_data}
       - --model_config
       - {inputPath: model_config}
-      - --out_dir
-      - /tmp/phase2_out
       - --buttons_actions_model
       - {outputPath: buttons_actions_model}
       - --content_display_model
