@@ -1,7 +1,7 @@
 name: evaluation
 description: >
   Evaluate trained models on test split.
-  - Phase 1: Evaluate ResNet50 checkpoint on test set.
+  - Phase 1: Evaluate ResNet50 checkpoint on test set (using model_meta.json and label_maps.json).
   - Phase 2: Evaluate per-category CLIP models on test set.
   Outputs phase1_test_metrics.json and phase2_eval_results.json.
 
@@ -10,6 +10,8 @@ inputs:
   - { name: val_data,     type: Dataset, description: "Directory: val split (category/component/IMGs)" }
   - { name: test_data,    type: Dataset, description: "Directory: test split (category/component/IMGs)" }
   - { name: phase1_model, type: Model,   description: "Best Phase 1 ResNet50 checkpoint (.pt)" }
+  - { name: model_meta,   type: Dataset, description: "Phase 1 model metadata JSON" }
+  - { name: label_maps,   type: Dataset, description: "Phase 1 label maps JSON" }
   - { name: buttons_actions_model,      type: Model, description: "Best CLIP model for buttons_actions" }
   - { name: content_display_model,      type: Model, description: "Best CLIP model for content_display" }
   - { name: feedback_status_model,      type: Model, description: "Best CLIP model for feedback_status" }
@@ -63,12 +65,12 @@ implementation:
             def __init__(self, split_root: Path, category_to_idx: dict, transform=None):
                 self.transform = transform
                 self.samples = []
-                for cat in sorted(category_to_idx.keys()):
+                for cat, idx in category_to_idx.items():
                     cat_dir = split_root / cat
                     if not cat_dir.exists():
                         continue
                     for img_path in list_images_under_category(cat_dir):
-                        self.samples.append((img_path, category_to_idx[cat]))
+                        self.samples.append((img_path, idx))
                 if len(self.samples) == 0:
                     raise RuntimeError(f"No images found under {split_root}.")
 
@@ -82,19 +84,21 @@ implementation:
                 if self.transform: img = self.transform(img)
                 return img, y
 
-        def eval_phase1(test_dir: Path, ckpt_path: Path, out_json: Path):
+        def eval_phase1(test_dir: Path, ckpt_path: Path, meta_path: Path, label_map_path: Path, out_json: Path):
             if not ckpt_path.exists():
                 print("[Phase1] No checkpoint found; skipping.")
                 return
-            ckpt = torch.load(ckpt_path, map_location="cpu")
-            category_to_idx = ckpt["category_to_idx"]
-            idx_to_category = ckpt["idx_to_category"]
-            image_size = ckpt["image_size"]
+
+            # Load metadata + label maps
+            meta = json.loads(Path(meta_path).read_text())
+            idx_to_category = json.loads(Path(label_map_path).read_text())
+            category_to_idx = {v: int(k) for k, v in idx_to_category.items()}
+            image_size = meta["image_size"]
 
             from torchvision.models import resnet50, ResNet50_Weights
             m = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
             m.fc = nn.Sequential(nn.Dropout(p=0.2), nn.Linear(m.fc.in_features, len(category_to_idx)))
-            m.load_state_dict(ckpt["model_state"], strict=True)
+            m.load_state_dict(torch.load(ckpt_path, map_location="cpu"), strict=True)
 
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             m.to(device)
@@ -216,6 +220,8 @@ implementation:
             ap.add_argument("--val_data")
             ap.add_argument("--test_data")
             ap.add_argument("--phase1_model")
+            ap.add_argument("--model_meta")
+            ap.add_argument("--label_maps")
             ap.add_argument("--buttons_actions_model")
             ap.add_argument("--content_display_model")
             ap.add_argument("--feedback_status_model")
@@ -231,7 +237,7 @@ implementation:
             test_dir = Path(args.test_data)
 
             # Phase 1 eval
-            eval_phase1(test_dir, Path(args.phase1_model), Path(args.phase1_metrics))
+            eval_phase1(test_dir, Path(args.phase1_model), Path(args.model_meta), Path(args.label_maps), Path(args.phase1_metrics))
 
             # Phase 2 eval
             model_files = {
@@ -258,6 +264,10 @@ implementation:
       - {inputPath: test_data}
       - --phase1_model
       - {inputPath: phase1_model}
+      - --model_meta
+      - {inputPath: model_meta}
+      - --label_maps
+      - {inputPath: label_maps}
       - --buttons_actions_model
       - {inputPath: buttons_actions_model}
       - --content_display_model
@@ -278,4 +288,3 @@ implementation:
       - {outputPath: phase1_metrics}
       - --phase2_metrics
       - {outputPath: phase2_metrics}
-
