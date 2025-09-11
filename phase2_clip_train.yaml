@@ -127,8 +127,16 @@ implementation:
             }
 
             for cat in CATS:
+                out_path = Path(path_map[cat])
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+
                 comps = comps_map.get(cat, [])
-                if not comps: results[cat]=0.0; continue
+                if not comps:
+                    # write dummy file so Argo always sees an artifact
+                    torch.save({"category": cat, "val_acc": 0.0, "warning": "no components found"}, out_path)
+                    results[cat] = 0.0
+                    continue
+
                 model, _ = clip.load(CLIP_MODEL, device=DEVICE); model.float()
                 train_tf = transforms.Compose([
                     transforms.Resize((224,224)), transforms.RandomResizedCrop(224,scale=(0.8,1.0)),
@@ -163,17 +171,12 @@ implementation:
                             "clip_model_state":model.state_dict(),
                             "head_state":head.state_dict(),
                             "component_to_idx":train_ds.component_to_idx,
-                            "idx_to_component":train_ds.component_to_idx,
-                            "components":train_ds.component_to_idx,
                             "category":cat,
                             "val_acc":val_acc
                         }
-                        # ✅ ensure output dir exists
-                        Path(path_map[cat]).parent.mkdir(parents=True, exist_ok=True)
-                        torch.save(save_dict, path_map[cat])
+                        torch.save(save_dict, out_path)
                 results[cat]=best
 
-            # ✅ ensure training_results dir exists
             Path(args.training_results).parent.mkdir(parents=True, exist_ok=True)
             Path(args.training_results).write_text(json.dumps(results,indent=2))
 
