@@ -53,6 +53,8 @@ implementation:
         # ---------- Shared ----------
         def list_images_under_category(category_dir: Path):
             files = []
+            if not category_dir.exists():
+                return files
             for comp_dir in category_dir.iterdir():
                 if comp_dir.is_dir():
                     for f in comp_dir.iterdir():
@@ -65,14 +67,25 @@ implementation:
             def __init__(self, split_root: Path, category_to_idx: dict, transform=None):
                 self.transform = transform
                 self.samples = []
+
+                # Try normal layout
                 for cat, idx in category_to_idx.items():
                     cat_dir = split_root / cat
-                    if not cat_dir.exists():
-                        continue
-                    for img_path in list_images_under_category(cat_dir):
-                        self.samples.append((img_path, idx))
-                if len(self.samples) == 0:
-                    raise RuntimeError(f"No images found under {split_root}.")
+                    if cat_dir.exists():
+                        for img_path in list_images_under_category(cat_dir):
+                            self.samples.append((img_path, idx))
+
+                # Fallback: maybe there is an extra "test/" folder
+                if not self.samples:
+                    alt_root = split_root / "test"
+                    for cat, idx in category_to_idx.items():
+                        cat_dir = alt_root / cat
+                        if cat_dir.exists():
+                            for img_path in list_images_under_category(cat_dir):
+                                self.samples.append((img_path, idx))
+
+                if not self.samples:
+                    raise RuntimeError(f"No images found under {split_root}. Expected category/component/images structure.")
 
             def __len__(self): return len(self.samples)
             def __getitem__(self, idx):
@@ -124,14 +137,14 @@ implementation:
                     n += bs
 
             metrics = {
-                "loss": tot_loss / n,
-                "acc": tot_acc / n,
+                "loss": tot_loss / n if n else None,
+                "acc": tot_acc / n if n else None,
                 "num_examples": n,
                 "num_classes": len(category_to_idx),
                 "labels": idx_to_category,
             }
             out_json.write_text(json.dumps(metrics, indent=2))
-            print(f"[Phase1] Test accuracy: {tot_acc/n*100:.2f}% ({tot_acc}/{n})")
+            print(f"[Phase1] Test accuracy: {tot_acc/n*100:.2f}% ({tot_acc}/{n})" if n else "[Phase1] No test examples found.")
 
         # ---------- Phase 2 ----------
         class CategoryComponentDataset(torch.utils.data.Dataset):
@@ -139,9 +152,15 @@ implementation:
                 self.transform = transform
                 self.samples = []
                 self.component_to_idx = {c: i for i, c in enumerate(components)}
+
+                # Try normal layout
                 cat_dir = root / split / category
                 if not cat_dir.exists():
+                    # Fallback: maybe nested test/
+                    cat_dir = root / "test" / category
+                if not cat_dir.exists():
                     raise FileNotFoundError(f"Category dir not found: {cat_dir}")
+
                 for comp in components:
                     comp_dir = cat_dir / comp
                     if not comp_dir.exists():
@@ -149,8 +168,9 @@ implementation:
                     for f in comp_dir.iterdir():
                         if f.suffix.lower() in IMG_EXTS:
                             self.samples.append((f, self.component_to_idx[comp]))
+
                 if not self.samples:
-                    raise RuntimeError(f"No samples for {category} in {split}/")
+                    raise RuntimeError(f"No samples for {category} in {cat_dir}/")
 
             def __len__(self): return len(self.samples)
             def __getitem__(self, idx):
@@ -187,7 +207,7 @@ implementation:
                 model.load_state_dict(ckpt["clip_model_state"], strict=True)
                 head.load_state_dict(ckpt["head_state"], strict=True)
                 try:
-                    ds = CategoryComponentDataset(test_dir.parent, cat, components, split="test", transform=tfm)
+                    ds = CategoryComponentDataset(test_dir, cat, components, split="test", transform=tfm)
                     dl = DataLoader(ds, batch_size=16, shuffle=False)
                     correct=total=0
                     with torch.no_grad():
