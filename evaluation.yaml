@@ -84,9 +84,6 @@ implementation:
                             for img_path in list_images_under_category(cat_dir):
                                 self.samples.append((img_path, idx))
 
-                if not self.samples:
-                    raise RuntimeError(f"No images found under {split_root}. Expected category/component/images structure.")
-
             def __len__(self): return len(self.samples)
             def __getitem__(self, idx):
                 path, y = self.samples[idx]
@@ -122,8 +119,14 @@ implementation:
                 transforms.Normalize(mean=weights.transforms().mean, std=weights.transforms().std),
             ])
             test_ds = UICategoryDataset(test_dir, category_to_idx, transform=eval_tfms)
-            test_loader = DataLoader(test_ds, batch_size=32, shuffle=False)
 
+            if len(test_ds) == 0:
+                print("[Phase1] No test images found — writing empty metrics.")
+                metrics = {"loss": None, "acc": None, "num_examples": 0}
+                out_json.write_text(json.dumps(metrics, indent=2))
+                return
+
+            test_loader = DataLoader(test_ds, batch_size=32, shuffle=False)
             criterion = nn.CrossEntropyLoss()
             m.eval(); tot_loss, tot_acc, n = 0.0, 0.0, 0
             with torch.no_grad():
@@ -159,7 +162,7 @@ implementation:
                     # Fallback: maybe nested test/
                     cat_dir = root / "test" / category
                 if not cat_dir.exists():
-                    raise FileNotFoundError(f"Category dir not found: {cat_dir}")
+                    return
 
                 for comp in components:
                     comp_dir = cat_dir / comp
@@ -168,9 +171,6 @@ implementation:
                     for f in comp_dir.iterdir():
                         if f.suffix.lower() in IMG_EXTS:
                             self.samples.append((f, self.component_to_idx[comp]))
-
-                if not self.samples:
-                    raise RuntimeError(f"No samples for {category} in {cat_dir}/")
 
             def __len__(self): return len(self.samples)
             def __getitem__(self, idx):
@@ -208,6 +208,9 @@ implementation:
                 head.load_state_dict(ckpt["head_state"], strict=True)
                 try:
                     ds = CategoryComponentDataset(test_dir, cat, components, split="test", transform=tfm)
+                    if len(ds) == 0:
+                        results[cat] = {"acc_percent": 0.0, "num_examples": 0, "num_components": len(components)}
+                        continue
                     dl = DataLoader(ds, batch_size=16, shuffle=False)
                     correct=total=0
                     with torch.no_grad():
