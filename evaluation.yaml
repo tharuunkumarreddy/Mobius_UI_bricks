@@ -40,7 +40,6 @@ implementation:
       - -u
       - -c
       - |
-        #!/usr/bin/env python3
         import argparse, json, statistics
         from pathlib import Path
         import torch, torch.nn as nn
@@ -78,25 +77,24 @@ implementation:
                 return img,y
 
         def eval_phase1(test_dir: Path, ckpt_path: Path, meta_path: Path, labels_path: Path, out_json: Path):
+            out_json.parent.mkdir(parents=True, exist_ok=True)
+
             if not ckpt_path.exists() or not test_dir.exists():
                 print("[Phase1] Missing checkpoint or test dir; skipping.")
                 out_json.write_text(json.dumps({"note":"no test data or checkpoint"}, indent=2))
                 return
 
-            # Load metadata
             meta = json.loads(Path(meta_path).read_text())
             image_size = int(meta["image_size"])
             categories = meta["categories"]
             category_to_idx = {c: i for i, c in enumerate(categories)}
             idx_to_category = {i: c for c, i in category_to_idx.items()}
 
-            # Check if any images exist
             if not any((test_dir/c).exists() and list((test_dir/c).glob("*")) for c in categories):
                 print(f"[Phase1] No test images under {test_dir}, skipping.")
                 out_json.write_text(json.dumps({"note":"no test samples"}, indent=2))
                 return
 
-            # Rebuild model
             from torchvision.models import resnet50, ResNet50_Weights
             m = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
             m.fc = nn.Sequential(nn.Dropout(0.2), nn.Linear(m.fc.in_features,len(categories)))
@@ -147,6 +145,8 @@ implementation:
                 return img,y
 
         def eval_phase2(test_root:Path, model_files, out_json:Path):
+            out_json.parent.mkdir(parents=True, exist_ok=True)
+
             MEAN=[0.48145466,0.4578275,0.40821073]; STD=[0.26862954,0.26130258,0.27577711]
             tfm=transforms.Compose([transforms.Resize((224,224)),transforms.ToTensor(),transforms.Normalize(mean=MEAN,std=STD)])
             device="cuda" if torch.cuda.is_available() else "cpu"; results={}
@@ -181,7 +181,6 @@ implementation:
                 except Exception as e:
                     results[category]={"val_acc":val_acc,"test_acc":0.0,"num_examples":0,"num_components":len(components),"error":str(e)}
 
-            # Global summary
             summary={
                 "avg_val_acc": statistics.mean(val_accs) if val_accs else None,
                 "avg_test_acc": statistics.mean(test_accs) if test_accs else None,
