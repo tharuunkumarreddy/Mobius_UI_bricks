@@ -153,7 +153,19 @@ implementation:
             val_accs=[]; test_accs=[]
             for pt in model_files:
                 ckpt=torch.load(pt,map_location="cpu")
-                category=ckpt["category"]; components=ckpt["components"]; val_acc=ckpt.get("val_acc",None)
+                category=ckpt["category"]
+                val_acc=ckpt.get("val_acc",None)
+
+                # fix: support both "components" and "component_to_idx"
+                if "components" in ckpt:
+                    components = ckpt["components"]
+                elif "component_to_idx" in ckpt:
+                    components = list(ckpt["component_to_idx"].keys())
+                else:
+                    print(f"[Phase2] {pt.name} missing components info, skipping")
+                    results[category]={"val_acc":val_acc,"test_acc":None,"note":"no components info"}
+                    continue
+
                 model,_=clip.load("ViT-B/32",device=device); model.float()
                 head=nn.Sequential(nn.Dropout(0.1), nn.Linear(model.visual.output_dim,len(components))).to(device)
                 model.load_state_dict(ckpt["clip_model_state"],strict=True)
