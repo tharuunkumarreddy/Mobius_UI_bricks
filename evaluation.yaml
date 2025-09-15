@@ -41,18 +41,17 @@ implementation:
       - -c
       - |
         #!/usr/bin/env python3
-        import argparse, json
+        import argparse, json, statistics
         from pathlib import Path
         import torch, torch.nn as nn
         from torch.utils.data import Dataset, DataLoader
         from torchvision import transforms
         from PIL import Image
         import clip
-        import statistics
 
         IMG_EXTS = {".jpg",".jpeg",".png",".webp"}
 
-        # -------- Phase1 Dataset --------
+        # -------- Phase1 --------
         def list_images_under_category(category_dir: Path):
             files=[]
             for comp_dir in category_dir.iterdir():
@@ -70,8 +69,6 @@ implementation:
                     if not cat_dir.exists(): continue
                     for img_path in list_images_under_category(cat_dir):
                         self.samples.append((img_path, idx))
-                if not self.samples:
-                    raise RuntimeError(f"No images found under {split_root}.")
             def __len__(self): return len(self.samples)
             def __getitem__(self, idx):
                 path,y=self.samples[idx]
@@ -82,14 +79,22 @@ implementation:
 
         def eval_phase1(test_dir: Path, ckpt_path: Path, meta_path: Path, labels_path: Path, out_json: Path):
             if not ckpt_path.exists() or not test_dir.exists():
-                print("[Phase1] Missing checkpoint or test dir; skipping."); return
+                print("[Phase1] Missing checkpoint or test dir; skipping.")
+                out_json.write_text(json.dumps({"note":"no test data or checkpoint"}, indent=2))
+                return
 
-            # Load metadata + label maps
+            # Load metadata
             meta = json.loads(Path(meta_path).read_text())
             image_size = int(meta["image_size"])
             categories = meta["categories"]
             category_to_idx = {c: i for i, c in enumerate(categories)}
             idx_to_category = {i: c for c, i in category_to_idx.items()}
+
+            # Check if any images exist
+            if not any((test_dir/c).exists() and list((test_dir/c).glob("*")) for c in categories):
+                print(f"[Phase1] No test images under {test_dir}, skipping.")
+                out_json.write_text(json.dumps({"note":"no test samples"}, indent=2))
+                return
 
             # Rebuild model
             from torchvision.models import resnet50, ResNet50_Weights
@@ -103,6 +108,11 @@ implementation:
             eval_tfms=transforms.Compose([transforms.Resize((image_size,image_size)),transforms.ToTensor(),
                                           transforms.Normalize(mean=weights.transforms().mean,std=weights.transforms().std)])
             test_ds=UICategoryDataset(test_dir,category_to_idx,transform=eval_tfms)
+            if len(test_ds)==0:
+                print(f"[Phase1] No valid test samples after scanning {test_dir}.")
+                out_json.write_text(json.dumps({"note":"no test samples"}, indent=2))
+                return
+
             test_loader=DataLoader(test_ds,batch_size=32,shuffle=False,num_workers=2,pin_memory=True)
             crit=nn.CrossEntropyLoss(); m.eval(); tot_loss=tot_acc=n=0
             with torch.no_grad():
@@ -115,7 +125,7 @@ implementation:
             out_json.write_text(json.dumps(metrics,indent=2))
             print("[Phase1] Test metrics:",metrics)
 
-        # -------- Phase2 Dataset --------
+        # -------- Phase2 --------
         class CategoryComponentDataset(Dataset):
             def __init__(self,root:Path,category:str,components,split="test",transform=None):
                 self.transform=transform; self.samples=[]; self.component_to_idx={c:i for i,c in enumerate(components)}
@@ -195,10 +205,8 @@ implementation:
 
             test_root=Path(args.test_data)
 
-            # Phase1 eval
             eval_phase1(test_root, Path(args.phase1_model), Path(args.model_meta), Path(args.label_maps), Path(args.phase1_test_metrics))
 
-            # Phase2 eval
             model_files=[Path(args.buttons_actions_model),Path(args.content_display_model),
                          Path(args.feedback_status_model),Path(args.input_forms_model),
                          Path(args.interactive_elements_model),Path(args.layout_structure_model),
