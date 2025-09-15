@@ -10,6 +10,8 @@ inputs:
   - { name: val_data,     type: Dataset, description: "Directory: val split (category/component/IMGs)" }
   - { name: test_data,    type: Dataset, description: "Directory: test split (category/component/IMGs)" }
   - { name: phase1_model, type: Model,   description: "Best Phase 1 ResNet50 checkpoint (.pt)" }
+  - { name: model_meta,   type: Dataset, description: "Phase 1 model metadata JSON (contains image_size, mean, std, categories)" }
+  - { name: label_maps,   type: Dataset, description: "JSON mapping: {index: category}" }
   - { name: buttons_actions_model,      type: Model, description: "Best CLIP model for buttons_actions category" }
   - { name: content_display_model,      type: Model, description: "Best CLIP model for content_display category" }
   - { name: feedback_status_model,      type: Model, description: "Best CLIP model for feedback_status category" }
@@ -46,6 +48,7 @@ implementation:
         from torchvision import transforms
         from PIL import Image
         import clip
+        import statistics
 
         IMG_EXTS = {".jpg",".jpeg",".png",".webp"}
 
@@ -62,11 +65,11 @@ implementation:
         class UICategoryDataset(Dataset):
             def __init__(self, split_root: Path, category_to_idx: dict, transform=None):
                 self.transform=transform; self.samples=[]
-                for cat in sorted(category_to_idx.keys()):
+                for cat, idx in category_to_idx.items():
                     cat_dir=split_root/cat
                     if not cat_dir.exists(): continue
                     for img_path in list_images_under_category(cat_dir):
-                        self.samples.append((img_path, category_to_idx[cat]))
+                        self.samples.append((img_path, idx))
                 if not self.samples:
                     raise RuntimeError(f"No images found under {split_root}.")
             def __len__(self): return len(self.samples)
@@ -77,15 +80,24 @@ implementation:
                 if self.transform: img=self.transform(img)
                 return img,y
 
-        def eval_phase1(test_dir: Path, ckpt_path: Path, out_json: Path):
+        def eval_phase1(test_dir: Path, ckpt_path: Path, meta_path: Path, labels_path: Path, out_json: Path):
             if not ckpt_path.exists() or not test_dir.exists():
                 print("[Phase1] Missing checkpoint or test dir; skipping."); return
-            ckpt=torch.load(ckpt_path,map_location="cpu")
-            category_to_idx=ckpt["category_to_idx"]; idx_to_category=ckpt["idx_to_category"]; image_size=ckpt["image_size"]
-            from torchvision.models import resnet50,ResNet50_Weights
-            m=resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
-            m.fc=nn.Sequential(nn.Dropout(0.2), nn.Linear(m.fc.in_features,len(category_to_idx)))
-            m.load_state_dict(ckpt["model_state"],strict=True)
+
+            # Load metadata + label maps
+            meta = json.loads(Path(meta_path).read_text())
+            image_size = int(meta["image_size"])
+            categories = meta["categories"]
+            category_to_idx = {c: i for i, c in enumerate(categories)}
+            idx_to_category = {i: c for c, i in category_to_idx.items()}
+
+            # Rebuild model
+            from torchvision.models import resnet50, ResNet50_Weights
+            m = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+            m.fc = nn.Sequential(nn.Dropout(0.2), nn.Linear(m.fc.in_features,len(categories)))
+            state_dict = torch.load(ckpt_path,map_location="cpu")
+            m.load_state_dict(state_dict, strict=True)
+
             device=torch.device("cuda" if torch.cuda.is_available() else "cpu"); m.to(device)
             weights=ResNet50_Weights.IMAGENET1K_V2
             eval_tfms=transforms.Compose([transforms.Resize((image_size,image_size)),transforms.ToTensor(),
@@ -99,7 +111,7 @@ implementation:
                     logits=m(x); loss=crit(logits,y)
                     bs=y.size(0); tot_loss+=loss.item()*bs; tot_acc+=(logits.argmax(1)==y).sum().item(); n+=bs
             metrics={"loss":tot_loss/n,"acc":tot_acc/n,"num_examples":n,
-                     "num_classes":len(category_to_idx),"labels":idx_to_category}
+                     "num_classes":len(categories),"labels":idx_to_category}
             out_json.write_text(json.dumps(metrics,indent=2))
             print("[Phase1] Test metrics:",metrics)
 
@@ -108,13 +120,14 @@ implementation:
             def __init__(self,root:Path,category:str,components,split="test",transform=None):
                 self.transform=transform; self.samples=[]; self.component_to_idx={c:i for i,c in enumerate(components)}
                 cat_dir=root/split/category
-                if not cat_dir.exists(): raise FileNotFoundError(f"Category dir not found: {cat_dir}")
+                if not cat_dir.exists():
+                    return
                 for comp in components:
                     comp_dir=cat_dir/comp
                     if comp_dir.exists():
                         for f in comp_dir.iterdir():
-                            if f.suffix.lower() in IMG_EXTS: self.samples.append((f,self.component_to_idx[comp]))
-                if not self.samples: raise RuntimeError(f"No samples for {category} in {split}/")
+                            if f.suffix.lower() in IMG_EXTS:
+                                self.samples.append((f,self.component_to_idx[comp]))
             def __len__(self): return len(self.samples)
             def __getitem__(self,idx):
                 p,y=self.samples[idx]
@@ -127,15 +140,21 @@ implementation:
             MEAN=[0.48145466,0.4578275,0.40821073]; STD=[0.26862954,0.26130258,0.27577711]
             tfm=transforms.Compose([transforms.Resize((224,224)),transforms.ToTensor(),transforms.Normalize(mean=MEAN,std=STD)])
             device="cuda" if torch.cuda.is_available() else "cpu"; results={}
+            val_accs=[]; test_accs=[]
             for pt in model_files:
                 ckpt=torch.load(pt,map_location="cpu")
-                category=ckpt["category"]; components=ckpt["components"]
+                category=ckpt["category"]; components=ckpt["components"]; val_acc=ckpt.get("val_acc",None)
                 model,_=clip.load("ViT-B/32",device=device); model.float()
                 head=nn.Sequential(nn.Dropout(0.1), nn.Linear(model.visual.output_dim,len(components))).to(device)
                 model.load_state_dict(ckpt["clip_model_state"],strict=True)
                 head.load_state_dict(ckpt["head_state"],strict=True)
                 try:
                     ds=CategoryComponentDataset(test_root,category,components,split="test",transform=tfm)
+                    if len(ds)==0:
+                        print(f"[Phase2] Skipping {category}: no test samples found")
+                        results[category]={"val_acc":val_acc,"test_acc":None,"num_examples":0,"num_components":len(components),"note":"no test samples"}
+                        if val_acc is not None: val_accs.append(val_acc)
+                        continue
                     dl=DataLoader(ds,batch_size=16,shuffle=False,num_workers=2,pin_memory=True)
                     correct=total=0; model.eval(); head.eval()
                     with torch.no_grad():
@@ -144,18 +163,29 @@ implementation:
                             feats=model.encode_image(x); feats=feats/feats.norm(dim=-1,keepdim=True)
                             logits=head(feats); _,pred=torch.max(logits,1)
                             total+=y.size(0); correct+=(pred==y).sum().item()
-                    acc=100.0*correct/total if total else 0.0
-                    results[category]={"acc_percent":acc,"num_examples":total,"num_components":len(components)}
-                    print(f"[Phase2] {category}: {acc:.2f}% ({correct}/{total})")
+                    test_acc=100.0*correct/total if total else 0.0
+                    results[category]={"val_acc":val_acc,"test_acc":test_acc,"num_examples":total,"num_components":len(components)}
+                    print(f"[Phase2] {category}: test_acc={test_acc:.2f}% ({correct}/{total}), val_acc={val_acc}")
+                    if val_acc is not None: val_accs.append(val_acc)
+                    test_accs.append(test_acc)
                 except Exception as e:
-                    results[category]={"acc_percent":0.0,"num_examples":0,"num_components":len(components),"error":str(e)}
+                    results[category]={"val_acc":val_acc,"test_acc":0.0,"num_examples":0,"num_components":len(components),"error":str(e)}
+
+            # Global summary
+            summary={
+                "avg_val_acc": statistics.mean(val_accs) if val_accs else None,
+                "avg_test_acc": statistics.mean(test_accs) if test_accs else None,
+                "num_categories": len(model_files),
+                "num_with_test": len(test_accs)
+            }
+            results["_summary"]=summary
             out_json.write_text(json.dumps(results,indent=2))
-            print("[Phase2] Results:",results)
+            print("[Phase2] Results with summary:",results)
 
         def main():
             ap=argparse.ArgumentParser()
             ap.add_argument("--train_data"); ap.add_argument("--val_data"); ap.add_argument("--test_data")
-            ap.add_argument("--phase1_model")
+            ap.add_argument("--phase1_model"); ap.add_argument("--model_meta"); ap.add_argument("--label_maps")
             ap.add_argument("--buttons_actions_model"); ap.add_argument("--content_display_model")
             ap.add_argument("--feedback_status_model"); ap.add_argument("--input_forms_model")
             ap.add_argument("--interactive_elements_model"); ap.add_argument("--layout_structure_model")
@@ -163,11 +193,10 @@ implementation:
             ap.add_argument("--phase1_test_metrics"); ap.add_argument("--phase2_eval_results")
             args=ap.parse_args()
 
-            dataset_root=Path(args.train_data).parent  # assume same root has train/val/test
             test_root=Path(args.test_data)
 
             # Phase1 eval
-            eval_phase1(test_root, Path(args.phase1_model), Path(args.phase1_test_metrics))
+            eval_phase1(test_root, Path(args.phase1_model), Path(args.model_meta), Path(args.label_maps), Path(args.phase1_test_metrics))
 
             # Phase2 eval
             model_files=[Path(args.buttons_actions_model),Path(args.content_display_model),
@@ -187,6 +216,10 @@ implementation:
       - {inputPath: test_data}
       - --phase1_model
       - {inputPath: phase1_model}
+      - --model_meta
+      - {inputPath: model_meta}
+      - --label_maps
+      - {inputPath: label_maps}
       - --buttons_actions_model
       - {inputPath: buttons_actions_model}
       - --content_display_model
