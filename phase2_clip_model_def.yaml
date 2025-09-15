@@ -56,7 +56,7 @@ implementation:
             ap.add_argument("--clip_model_name", type=str, default="ViT-B/32")
             ap.add_argument("--categories_json", type=Path, default=None)
             ap.add_argument("--batch_size", type=int, default=16)
-            ap.add_argument("--epochs", type=int, default=11)
+            ap.add_argument("--epochs", type=int, default=15)
             ap.add_argument("--lr_head", type=float, default=1e-3)
             ap.add_argument("--lr_backbone", type=float, default=1e-5)
             ap.add_argument("--weight_decay", type=float, default=1e-4)
@@ -121,6 +121,7 @@ implementation:
       - {inputPath: categories_json}
       - --model_config
       - {outputPath: model_config}
+
 
 
 
