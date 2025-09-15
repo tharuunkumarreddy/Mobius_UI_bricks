@@ -6,7 +6,7 @@ inputs:
   - { name: test_data,  type: Dataset, description: "Directory: test split (category/component/IMGs). Optional; used for final eval only." }
   - { name: model_init, type: Model,   description: "Initial model weights (.pt) from the model definition step." }
   - { name: model_meta, type: Dataset, description: "Model metadata JSON from the model definition step." }
-  - { name: epochs,     type: Integer, default: '1', description: "Number of training epochs (use 1 for a quick smoke test)" }
+  - { name: epochs,     type: Integer, default: '10', description: "Number of training epochs (use 1 for a quick smoke test)" }
 outputs:
   - { name: best_model, type: Model,   description: "The best trained model weights (.pt file)." }
   - { name: label_maps, type: Dataset, description: "JSON mapping: {index: category}." }
@@ -261,3 +261,4 @@ implementation:
       - {outputPath: train_log}
       - --epochs
       - {inputValue: epochs}
+
