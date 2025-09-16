@@ -33,14 +33,14 @@ implementation:
         # ---------- Download dataset ----------
         WORKDIR="/ui_components_temp"
         mkdir -p "$WORKDIR"
-        kaggle datasets download -d chtharunkumarreddy09/Minor_Classification_Data -p "$WORKDIR" --force
+        kaggle datasets download -d chtharunkumarreddy09/classification-dataset-4 -p "$WORKDIR" --force
 
         ZIP_PATH="$(ls -1 "$WORKDIR"/*.zip | head -n1 || true)"
         [ -n "$ZIP_PATH" ] || { echo "ERROR: Zip not found after download"; exit 1; }
         unzip -q "$ZIP_PATH" -d "$WORKDIR"
 
         # Detect root folder of extracted dataset
-        SRC_DIR="$(find "$WORKDIR" -type d -name 'minor_Classification_Dataset' -print -quit || true)"
+        SRC_DIR="$(find "$WORKDIR" -type d -name 'Classification_Dataset' -print -quit || true)"
         [ -n "$SRC_DIR" ] || SRC_DIR="$(find "$WORKDIR" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
         [ -d "$SRC_DIR" ] || { echo "ERROR: Could not locate dataset root under $WORKDIR"; exit 1; }
         export SRC_DIR
