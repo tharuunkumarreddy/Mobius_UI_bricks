@@ -313,10 +313,12 @@ implementation:
       - {inputPath: train_corpus}
       - --model-config
       - {inputPath: model_config}
-      - --model-weights
-      - {inputPath: model_weights}
+      - --pretrained-weights
+      - {inputPath: pretrained_weights}
       - --model-py-in
       - {inputPath: model_py_in}
+      - --model-py-out
+      - {outputPath: model_py}
 
       - --learning-rate
       - {inputValue: learning_rate}
@@ -347,6 +349,15 @@ implementation:
       - --num-proc
       - {inputValue: num_proc}
 
+      - --lora_r
+      - {inputValue: lora_r}
+      - --lora_alpha
+      - {inputValue: lora_alpha}
+      - --lora_dropout
+      - {inputValue: lora_dropout}
+      - --lora_bias
+      - {inputValue: lora_bias}
+
       - --best-weights
       - {outputPath: best_weights}
       - --final-weights
@@ -355,7 +366,5 @@ implementation:
       - {outputPath: training_report}
       - --loss-curve-csv
       - {outputPath: loss_curve_csv}
-      - --model-py-out
-      - {outputPath: model_py}
       - --schema-output
       - {outputPath: schema_json}
