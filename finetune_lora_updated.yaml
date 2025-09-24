@@ -1,86 +1,36 @@
 name: FineTune Gemma3 LoRA
 description: Fine-tunes a pretrained Gemma3 model using LoRA while preserving training schema and loss tracking.
-
 inputs:
-  - name: tokenizer_json
-    type: Model
-  - name: train_corpus
-    type: Data
-  - name: model_config
-    type: Data
-  - name: pretrained_weights
-    type: Model
-  - name: model_py_in
-    type: Data
-  - name: learning_rate
-    type: Float
-    default: 1e-4
-  - name: min_lr
-    type: Float
-    default: 1e-5
-  - name: warmup_steps
-    type: Integer
-    default: 1000
-  - name: max_iters
-    type: Integer
-    default: 150000
-  - name: batch_size
-    type: Integer
-    default: 32
-  - name: block_size
-    type: Integer
-    default: 128
-  - name: grad_accum
-    type: Integer
-    default: 32
-  - name: eval_interval
-    type: Integer
-    default: 1000
-  - name: eval_iters
-    type: Integer
-    default: 500
-  - name: weight_decay
-    type: Float
-    default: 0.1
-  - name: beta2
-    type: Float
-    default: 0.95
-  - name: clip_grad_norm
-    type: Float
-    default: 0.5
-  - name: val_fraction
-    type: Float
-    default: 0.1
-  - name: num_proc
-    type: Integer
-    default: 8
-  - name: lora_r
-    type: Integer
-    default: 8
-  - name: lora_alpha
-    type: Integer
-    default: 8
-  - name: lora_dropout
-    type: Float
-    default: 0.1
-  - name: lora_bias
-    type: String
-    default: "none"
-
+  - {name: tokenizer_json,            type: String, description: "Path to tokenizer.json"}
+  - {name: train_corpus,              type: String, description: "Path to training text file"}
+  - {name: model_config,              type: String, description: "Path to model config JSON"}
+  - {name: pretrained_weights,        type: String, description: "Path to pretrained model .pt/.bin"}
+  - {name: model_py_in,               type: String, description: "Path to Gemma3 model .py file"}
+  - {name: learning_rate,             type: Float,  default: 1e-4}
+  - {name: min_lr,                    type: Float,  default: 1e-5}
+  - {name: warmup_steps,              type: Integer, default: 1000}
+  - {name: max_iters,                 type: Integer, default: 150000}
+  - {name: batch_size,                type: Integer, default: 32}
+  - {name: block_size,                type: Integer, default: 128}
+  - {name: grad_accum,                type: Integer, default: 32}
+  - {name: eval_interval,             type: Integer, default: 1000}
+  - {name: eval_iters,                type: Integer, default: 500}
+  - {name: weight_decay,              type: Float,  default: 0.1}
+  - {name: beta2,                     type: Float,  default: 0.95}
+  - {name: clip_grad_norm,            type: Float,  default: 0.5}
+  - {name: val_fraction,              type: Float,  default: 0.1}
+  - {name: num_proc,                  type: Integer, default: 8}
+  - {name: lora_r,                    type: Integer, default: 8}
+  - {name: lora_alpha,                type: Integer, default: 8}
+  - {name: lora_dropout,              type: Float,  default: 0.1}
+  - {name: lora_bias,                 type: String, default: "none"}
 outputs:
-  - name: best_weights
-    type: Model
-  - name: final_weights
-    type: Model
-  - name: training_report
-    type: Data
-  - name: loss_curve_csv
-    type: Data
-  - name: model_py
-    type: Data
-  - name: schema_json
-    type: String
-
+  - {name: best_weights,     type: String, description: "Path to best LoRA-adapted weights"}
+  - {name: final_weights,    type: String, description: "Path to final LoRA-adapted weights"}
+  - {name: training_report,  type: String, description: "JSON report with best loss/updates"}
+  - {name: loss_curve_csv,   type: String, description: "CSV of train/val loss and lr per eval"}
+  - {name: model_py,         type: String, description: "Copied model.py (for lineage)"}
+  - {name: schema_json,      type: String, description: "Schema-like summary (loss timeline)"}
 implementation:
   container:
     image: python:3.9
@@ -88,10 +38,17 @@ implementation:
       - python3
       - -u
       - -c
-      - |
+      - |-
         import subprocess, sys
         subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir",
-                        "torch>=2.2", "transformers", "datasets", "tqdm", "peft", "numpy"], check=True)
+                        "torch>=2.2",
+                        "transformers>=4.41",
+                        "datasets>=2.19",
+                        "tqdm",
+                        "peft>=0.11.0",
+                        "numpy",
+                        "tokenizers>=0.15",
+                        "accelerate>=0.29"], check=True)
 
         import os, json, argparse, shutil, math
         import torch
@@ -119,14 +76,16 @@ implementation:
             ds = {"train": split["train"], "val": split["test"]}
 
             def proc(ex):
-                return {"ids": tok.encode(ex["text"]).ids, "len": len(tok.encode(ex["text"]).ids)}
+                ids = tok.encode(ex["text"]).ids
+                return {"ids": ids, "len": len(ids)}
 
             nproc = max(1, min(int(num_proc), (os.cpu_count() or 1)))
             tokenized = {sp: dset.map(proc, remove_columns=dset.column_names, desc=f"tokenizing {sp}", num_proc=nproc) for sp, dset in ds.items()}
 
             def write_split(dset, filename):
                 total = int(np.sum(dset["len"], dtype=np.uint64))
-                if total == 0: raise ValueError(f"{filename}: no tokens to write")
+                if total == 0:
+                    raise ValueError(f"{filename}: no tokens to write. Check tokenizer/corpus.")
                 arr = np.memmap(filename, dtype=BIN_DTYPE, mode="w+", shape=(total,))
                 shard_size = max(1, len(dset) // 1024)
                 total_shards = max(1, (len(dset) + shard_size - 1) // shard_size)
@@ -137,7 +96,7 @@ implementation:
                     batch = dset.select(range(start, stop)).with_format(type="numpy")
                     ids_list = batch["ids"]
                     if not ids_list: continue
-                    arr_batch = np.concatenate([np.asarray(x, dtype=BIN_DTYPE) for x in ids_list])
+                    arr_batch = np.concatenate([np.asarray(x, dtype=arr.dtype) for x in ids_list])
                     arr[idx: idx+len(arr_batch)] = arr_batch
                     idx += len(arr_batch)
                 arr.flush()
@@ -149,7 +108,7 @@ implementation:
             with open("bin_meta.json", "w") as f: json.dump(meta,f,indent=2)
             return meta
 
-        def make_get_batch(device, block_size, batch_size):
+        def make_get_batch(block_size, batch_size):
             with open("bin_meta.json", "r") as f: meta=json.load(f)
             dtype_map = {"uint16": np.uint16, "uint32": np.uint32, "uint64": np.uint64}
             BIN_DTYPE = dtype_map[meta["bin_dtype"]]
@@ -157,7 +116,8 @@ implementation:
             def get_batch(split):
                 path = TRAIN_BIN if split=="train" else VAL_BIN
                 data = np.memmap(path, dtype=BIN_DTYPE, mode="r")
-                if len(data) <= block_size: raise ValueError(f"{path}: not enough tokens for block_size={block_size}")
+                if len(data) <= block_size:
+                    raise ValueError(f"{path}: not enough tokens for block_size={block_size}")
                 ix = torch.randint(len(data)-block_size-1, (batch_size,))
                 x = torch.stack([torch.from_numpy(np.asarray(data[i:i+block_size], dtype=np.int64)) for i in ix])
                 y = torch.stack([torch.from_numpy(np.asarray(data[i+1:i+block_size+1], dtype=np.int64)) for i in ix])
@@ -172,7 +132,9 @@ implementation:
                     losses = torch.zeros(eval_iters, device="cpu")
                     for k in range(eval_iters):
                         X, Y = get_batch(split)
-                        with ctx: _, loss = model(X,Y)
+                        X, Y = X.to(model.device), Y.to(model.device)
+                        with ctx:
+                            _, loss = model(X,Y)
                         losses[k] = loss.item()
                     out[split] = losses.mean().item()
             model.train()
@@ -223,18 +185,23 @@ implementation:
             model = Gemma3Model(cfg).to(device)
             model.load_state_dict(state, strict=True)
 
-            model = prepare_model_for_int8_training(model)
+            try:
+                model = prepare_model_for_int8_training(model)
+            except Exception as e:
+                # Fallback if int8 prep requires unavailable backends
+                pass
+
             peft_config = LoraConfig(r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout, bias=args.lora_bias)
             model = get_peft_model(model, peft_config)
             model.train()
 
-            meta = tokenize_to_bins(args.tokenizer_json, args.train_corpus, args.val_fraction, args.num_proc)
-            get_batch = make_get_batch(device, args.block_size, args.batch_size)
+            _ = tokenize_to_bins(args.tokenizer_json, args.train_corpus, args.val_fraction, args.num_proc)
+            get_batch = make_get_batch(args.block_size, args.batch_size)
 
             optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9,args.beta2), weight_decay=args.weight_decay)
             from torch.optim.lr_scheduler import LinearLR, SequentialLR, CosineAnnealingLR
-            total_updates = math.ceil(args.max_iters / max(1,args.grad_accum))
-            warm_updates = min(args.warmup_steps, max(1, total_updates))
+            total_updates = max(1, math.ceil(args.max_iters / max(1,args.grad_accum)))
+            warm_updates = min(args.warmup_steps, total_updates)
             sched_warm = LinearLR(optimizer, total_iters=warm_updates)
             sched_cos = CosineAnnealingLR(optimizer, T_max=max(1, total_updates-warm_updates), eta_min=args.min_lr)
             scheduler = SequentialLR(optimizer, schedulers=[sched_warm,sched_cos], milestones=[warm_updates])
@@ -245,19 +212,26 @@ implementation:
             ctx = torch.amp.autocast(device_type="cuda", dtype=torch.float16) if device=="cuda" else nullcontext()
             pbar = tqdm(range(args.max_iters), desc="train micro-steps")
 
+            optimizer.zero_grad(set_to_none=True)
             for step in pbar:
                 X,Y = get_batch("train")
-                with ctx: _, loss = model(X,Y)
+                X, Y = X.to(device), Y.to(device)
+                with ctx:
+                    _, loss = model(X,Y)
                 (loss/args.grad_accum).backward()
                 if ((step+1)%args.grad_accum==0) or (step+1==args.max_iters):
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_grad_norm)
-                    optimizer.step(); optimizer.zero_grad(set_to_none=True)
-                    scheduler.step(); updates+=1
-                    if updates%max(1,args.eval_interval)==0:
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    scheduler.step()
+                    updates+=1
+                    if (updates % max(1,args.eval_interval)) == 0:
                         losses = estimate_loss(model,get_batch,args.eval_iters,ctx)
                         train_curve.append(losses["train"]); val_curve.append(losses["val"]); lr_curve.append(optimizer.param_groups[0]["lr"])
                         pbar.set_postfix(train=f"{losses['train']:.4f}", val=f"{losses['val']:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}")
-                        if losses["val"] < best_val: best_val = losses["val"]; torch.save(model.state_dict(), args.best_weights)
+                        if losses["val"] < best_val:
+                            best_val = losses["val"]
+                            torch.save(model.state_dict(), args.best_weights)
 
             torch.save(model.state_dict(), args.final_weights)
             report = {"best_val_loss": best_val,"updates": updates,"max_iters": args.max_iters}
@@ -282,7 +256,7 @@ implementation:
       - {inputPath: model_config}
       - --pretrained-weights
       - {inputPath: pretrained_weights}
-      - --model-py-in
+      - --model_py_in
       - {inputPath: model_py_in}
       - --model-py-out
       - {outputPath: model_py}
