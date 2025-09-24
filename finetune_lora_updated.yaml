@@ -42,212 +42,211 @@ implementation:
       - -u
       - -c
       - |
-        import subprocess, sys
-        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir",
-                        "torch>=2.2", "transformers", "datasets", "tqdm", "peft", "numpy", "tokenizers"], check=True)
+          import subprocess, sys
+          subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir",
+                          "torch>=2.2", "transformers", "datasets", "tqdm", "peft", "numpy", "tokenizers"], check=True)
 
-        import os, json, argparse, shutil, math
-        import torch
-        import torch.nn.functional as F
-        import numpy as np
-        from contextlib import nullcontext
-        from tokenizers import Tokenizer
-        from datasets import load_dataset
-        from tqdm import tqdm
-        from peft import LoraConfig, get_peft_model
-        try:
-            from peft import prepare_model_for_int8_training as _prep_int8
-        except Exception:
-            _prep_int8 = None
-        from importlib.util import spec_from_file_location, module_from_spec
-        import csv
+          import os, json, argparse, shutil, math
+          import torch
+          import torch.nn.functional as F
+          import numpy as np
+          from contextlib import nullcontext
+          from tokenizers import Tokenizer
+          from datasets import load_dataset
+          from tqdm import tqdm
+          from peft import LoraConfig, get_peft_model
+          try:
+              from peft import prepare_model_for_int8_training as _prep_int8
+          except Exception:
+              _prep_int8 = None
+          from importlib.util import spec_from_file_location, module_from_spec
+          import csv
 
-        def choose_bin_dtype(vocab_size):
-            if vocab_size <= (1 << 16): return np.uint16
-            if vocab_size <= (1 << 32): return np.uint32
-            return np.uint64
+          def choose_bin_dtype(vocab_size):
+              if vocab_size <= (1 << 16): return np.uint16
+              if vocab_size <= (1 << 32): return np.uint32
+              return np.uint64
 
-        def tokenize_to_bins(tokenizer_path, train_txt, val_fraction, num_proc):
-            tok = Tokenizer.from_file(tokenizer_path)
-            vocab_size = tok.get_vocab_size()
-            BIN_DTYPE = choose_bin_dtype(vocab_size)
-            ds_single = load_dataset("text", data_files={"train": train_txt})
-            split = ds_single["train"].train_test_split(test_size=float(val_fraction), seed=42)
-            ds = {"train": split["train"], "val": split["test"]}
+          def tokenize_to_bins(tokenizer_path, train_txt, val_fraction, num_proc):
+              tok = Tokenizer.from_file(tokenizer_path)
+              vocab_size = tok.get_vocab_size()
+              BIN_DTYPE = choose_bin_dtype(vocab_size)
+              ds_single = load_dataset("text", data_files={"train": train_txt})
+              split = ds_single["train"].train_test_split(test_size=float(val_fraction), seed=42)
+              ds = {"train": split["train"], "val": split["test"]}
 
-            def proc(ex):
-                enc = tok.encode(ex["text"])
-                return {"ids": enc.ids, "len": len(enc.ids)}
+              def proc(ex):
+                  enc = tok.encode(ex["text"])
+                  return {"ids": enc.ids, "len": len(enc.ids)}
 
-            nproc = max(1, min(int(num_proc), (os.cpu_count() or 1)))
-            tokenized = {sp: dset.map(proc, remove_columns=dset.column_names, desc=f"tokenizing {sp}", num_proc=nproc) for sp, dset in ds.items()}
+              nproc = max(1, min(int(num_proc), (os.cpu_count() or 1)))
+              tokenized = {sp: dset.map(proc, remove_columns=dset.column_names, desc=f"tokenizing {sp}", num_proc=nproc) for sp, dset in ds.items()}
 
-            def write_split(dset, filename):
-                total = int(np.sum(dset["len"], dtype=np.uint64))
-                if total == 0: raise ValueError(f"{filename}: no tokens to write")
-                arr = np.memmap(filename, dtype=BIN_DTYPE, mode="w+", shape=(total,))
-                shard_size = max(1, len(dset) // 1024)
-                total_shards = max(1, (len(dset) + shard_size - 1) // shard_size)
-                idx = 0
-                for i in tqdm(range(total_shards), desc=f"writing {filename}"):
-                    start, stop = i*shard_size, min(len(dset), (i+1)*shard_size)
-                    if start >= stop: continue
-                    batch = dset.select(range(start, stop)).with_format(type="numpy")
-                    ids_list = batch["ids"]
-                    if not ids_list: continue
-                    arr_batch = np.concatenate([np.asarray(x, dtype=BIN_DTYPE) for x in ids_list])
-                    arr[idx: idx+len(arr_batch)] = arr_batch
-                    idx += len(arr_batch)
-                arr.flush()
-                return total
+              def write_split(dset, filename):
+                  total = int(np.sum(dset["len"], dtype=np.uint64))
+                  if total == 0: raise ValueError(f"{filename}: no tokens to write")
+                  arr = np.memmap(filename, dtype=BIN_DTYPE, mode="w+", shape=(total,))
+                  shard_size = max(1, len(dset) // 1024)
+                  total_shards = max(1, (len(dset) + shard_size - 1) // shard_size)
+                  idx = 0
+                  for i in tqdm(range(total_shards), desc=f"writing {filename}"):
+                      start, stop = i*shard_size, min(len(dset), (i+1)*shard_size)
+                      if start >= stop: continue
+                      batch = dset.select(range(start, stop)).with_format(type="numpy")
+                      ids_list = batch["ids"]
+                      if not ids_list: continue
+                      arr_batch = np.concatenate([np.asarray(x, dtype=BIN_DTYPE) for x in ids_list])
+                      arr[idx: idx+len(arr_batch)] = arr_batch
+                      idx += len(arr_batch)
+                  arr.flush()
+                  return total
 
-            train_tokens = write_split(tokenized["train"], "train.bin")
-            val_tokens = write_split(tokenized["val"], "val.bin")
-            meta = {"vocab_size": vocab_size, "train_tokens": int(train_tokens), "val_tokens": int(val_tokens), "bin_dtype": str(BIN_DTYPE.__name__)}
-            with open("bin_meta.json", "w") as f: json.dump(meta,f,indent=2)
-            return meta
+              train_tokens = write_split(tokenized["train"], "train.bin")
+              val_tokens = write_split(tokenized["val"], "val.bin")
+              meta = {"vocab_size": vocab_size, "train_tokens": int(train_tokens), "val_tokens": int(val_tokens), "bin_dtype": str(BIN_DTYPE.__name__)}
+              with open("bin_meta.json", "w") as f: json.dump(meta,f,indent=2)
+              return meta
 
-        def make_get_batch(device, block_size, batch_size):
-            with open("bin_meta.json", "r") as f: meta=json.load(f)
-            dtype_map = {"uint16": np.uint16, "uint32": np.uint32, "uint64": np.uint64}
-            BIN_DTYPE = dtype_map[meta["bin_dtype"]]
-            TRAIN_BIN, VAL_BIN = "train.bin", "val.bin"
-            def get_batch(split):
-                path = TRAIN_BIN if split=="train" else VAL_BIN
-                data = np.memmap(path, dtype=BIN_DTYPE, mode="r")
-                if len(data) <= block_size: raise ValueError(f"{path}: not enough tokens for block_size={block_size}")
-                ix = torch.randint(len(data)-block_size-1, (batch_size,))
-                x = torch.stack([torch.from_numpy(np.asarray(data[i:i+block_size], dtype=np.int64)) for i in ix])
-                y = torch.stack([torch.from_numpy(np.asarray(data[i+1:i+block_size+1], dtype=np.int64)) for i in ix])
-                return x, y
-            return get_batch
+          def make_get_batch(device, block_size, batch_size):
+              with open("bin_meta.json", "r") as f: meta=json.load(f)
+              dtype_map = {"uint16": np.uint16, "uint32": np.uint32, "uint64": np.uint64}
+              BIN_DTYPE = dtype_map[meta["bin_dtype"]]
+              TRAIN_BIN, VAL_BIN = "train.bin", "val.bin"
+              def get_batch(split):
+                  path = TRAIN_BIN if split=="train" else VAL_BIN
+                  data = np.memmap(path, dtype=BIN_DTYPE, mode="r")
+                  if len(data) <= block_size: raise ValueError(f"{path}: not enough tokens for block_size={block_size}")
+                  ix = torch.randint(len(data)-block_size-1, (batch_size,))
+                  x = torch.stack([torch.from_numpy(np.asarray(data[i:i+block_size], dtype=np.int64)) for i in ix])
+                  y = torch.stack([torch.from_numpy(np.asarray(data[i+1:i+block_size+1], dtype=np.int64)) for i in ix])
+                  return x, y
+              return get_batch
 
-        def estimate_loss(model, get_batch, eval_iters, ctx):
-            out = {}
-            model.eval()
-            with torch.inference_mode():
-                for split in ["train","val"]:
-                    losses = torch.zeros(eval_iters, device="cpu")
-                    for k in range(eval_iters):
-                        X, Y = get_batch(split)
-                        with ctx: _, loss = model(X,Y)
-                        losses[k] = loss.item()
-                    out[split] = losses.mean().item()
-            model.train()
-            return out
+          def estimate_loss(model, get_batch, eval_iters, ctx):
+              out = {}
+              model.eval()
+              with torch.inference_mode():
+                  for split in ["train","val"]:
+                      losses = torch.zeros(eval_iters, device="cpu")
+                      for k in range(eval_iters):
+                          X, Y = get_batch(split)
+                          with ctx: _, loss = model(X,Y)
+                          losses[k] = loss.item()
+                      out[split] = losses.mean().item()
+              model.train()
+              return out
 
-        def main():
-            ap = argparse.ArgumentParser()
-            # Accept both dash and underscore variants where it mattered
-            ap.add_argument("--tokenizer-json", dest="tokenizer_json", required=True)
-            ap.add_argument("--train-corpus", dest="train_corpus", required=True)
-            ap.add_argument("--model-config", dest="model_config", required=True)
-            ap.add_argument("--pretrained-weights", dest="pretrained_weights", required=True)
-            ap.add_argument("--model-py-in", dest="model_py_in", required=False)
-            ap.add_argument("--model_py_in", dest="model_py_in", required=False)
-            ap.add_argument("--model-py-out", dest="model_py_out", required=True)
+          def main():
+              ap = argparse.ArgumentParser()
+              ap.add_argument("--tokenizer-json", dest="tokenizer_json", required=True)
+              ap.add_argument("--train-corpus", dest="train_corpus", required=True)
+              ap.add_argument("--model-config", dest="model_config", required=True)
+              ap.add_argument("--pretrained-weights", dest="pretrained_weights", required=True)
+              ap.add_argument("--model-py-in", dest="model_py_in", required=False)
+              ap.add_argument("--model_py_in", dest="model_py_in", required=False)
+              ap.add_argument("--model-py-out", dest="model_py_out", required=True)
 
-            ap.add_argument("--learning-rate", type=float, dest="learning_rate", required=True)
-            ap.add_argument("--min-lr", type=float, dest="min_lr", required=True)
-            ap.add_argument("--warmup-steps", type=int, dest="warmup_steps", required=True)
-            ap.add_argument("--max-iters", type=int, dest="max_iters", required=True)
-            ap.add_argument("--batch-size", type=int, dest="batch_size", required=True)
-            ap.add_argument("--block-size", type=int, dest="block_size", required=True)
-            ap.add_argument("--grad-accum", type=int, dest="grad_accum", required=True)
-            ap.add_argument("--eval-interval", type=int, dest="eval_interval", required=True)
-            ap.add_argument("--eval-iters", type=int, dest="eval_iters", required=True)
-            ap.add_argument("--weight-decay", type=float, dest="weight_decay", required=True)
-            ap.add_argument("--beta2", type=float, dest="beta2", required=True)
-            ap.add_argument("--clip-grad-norm", type=float, dest="clip_grad_norm", required=True)
-            ap.add_argument("--val-fraction", type=float, dest="val_fraction", required=True)
-            ap.add_argument("--num-proc", type=int, dest="num_proc", required=True)
+              ap.add_argument("--learning-rate", type=float, dest="learning_rate", required=True)
+              ap.add_argument("--min-lr", type=float, dest="min_lr", required=True)
+              ap.add_argument("--warmup-steps", type=int, dest="warmup_steps", required=True)
+              ap.add_argument("--max-iters", type=int, dest="max_iters", required=True)
+              ap.add_argument("--batch-size", type=int, dest="batch_size", required=True)
+              ap.add_argument("--block-size", type=int, dest="block_size", required=True)
+              ap.add_argument("--grad-accum", type=int, dest="grad_accum", required=True)
+              ap.add_argument("--eval-interval", type=int, dest="eval_interval", required=True)
+              ap.add_argument("--eval-iters", type=int, dest="eval_iters", required=True)
+              ap.add_argument("--weight-decay", type=float, dest="weight_decay", required=True)
+              ap.add_argument("--beta2", type=float, dest="beta2", required=True)
+              ap.add_argument("--clip-grad-norm", type=float, dest="clip_grad_norm", required=True)
+              ap.add_argument("--val-fraction", type=float, dest="val_fraction", required=True)
+              ap.add_argument("--num-proc", type=int, dest="num_proc", required=True)
 
-            ap.add_argument("--lora_r", type=int, default=8)
-            ap.add_argument("--lora_alpha", type=int, default=8)
-            ap.add_argument("--lora_dropout", type=float, default=0.1)
-            ap.add_argument("--lora_bias", type=str, default="none")
+              ap.add_argument("--lora_r", type=int, default=8)
+              ap.add_argument("--lora_alpha", type=int, default=8)
+              ap.add_argument("--lora_dropout", type=float, default=0.1)
+              ap.add_argument("--lora_bias", type=str, default="none")
 
-            ap.add_argument("--best-weights", dest="best_weights", required=True)
-            ap.add_argument("--final-weights", dest="final_weights", required=True)
-            ap.add_argument("--training-report", dest="training_report", required=True)
-            ap.add_argument("--loss-curve-csv", dest="loss_curve_csv", required=True)
-            ap.add_argument("--schema-output", dest="schema_output", required=True)
-            args = ap.parse_args()
+              ap.add_argument("--best-weights", dest="best_weights", required=True)
+              ap.add_argument("--final-weights", dest="final_weights", required=True)
+              ap.add_argument("--training-report", dest="training_report", required=True)
+              ap.add_argument("--loss-curve-csv", dest="loss_curve_csv", required=True)
+              ap.add_argument("--schema-output", dest="schema_output", required=True)
+              args = ap.parse_args()
 
-            # Copy model.py (keep original unchanged)
-            if args.model_py_in:
-                shutil.copyfile(args.model_py_in, args.model_py_out)
-                model_py_path = args.model_py_out
-            else:
-                model_py_path = args.model_py_out
+              if args.model_py_in:
+                  shutil.copyfile(args.model_py_in, args.model_py_out)
+                  model_py_path = args.model_py_out
+              else:
+                  model_py_path = args.model_py_out
 
-            with open(args.model_config,"r") as f: cfg = json.load(f)
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+              with open(args.model_config,"r") as f: cfg = json.load(f)
+              device = "cuda" if torch.cuda.is_available() else "cpu"
 
-            spec_mod = spec_from_file_location("model_module", model_py_path)
-            mod = module_from_spec(spec_mod)
-            spec_mod.loader.exec_module(mod)
-            Gemma3Model = getattr(mod, "Gemma3Model")
-            state = torch.load(args.pretrained_weights, map_location=device)
-            model = Gemma3Model(cfg).to(device)
-            model.load_state_dict(state, strict=True)
+              spec_mod = spec_from_file_location("model_module", model_py_path)
+              mod = module_from_spec(spec_mod)
+              spec_mod.loader.exec_module(mod)
+              Gemma3Model = getattr(mod, "Gemma3Model")
+              state = torch.load(args.pretrained_weights, map_location=device)
+              model = Gemma3Model(cfg).to(device)
+              model.load_state_dict(state, strict=True)
 
-            if _prep_int8 is not None:
-                try:
-                    model = _prep_int8(model)
-                except Exception:
-                    pass
-            peft_config = LoraConfig(r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout, bias=args.lora_bias)
-            model = get_peft_model(model, peft_config)
-            model.train()
+              if _prep_int8 is not None:
+                  try:
+                      model = _prep_int8(model)
+                  except Exception:
+                      pass
+              peft_config = LoraConfig(r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout, bias=args.lora_bias)
+              model = get_peft_model(model, peft_config)
+              model.train()
 
-            tokenize_to_bins(args.tokenizer_json, args.train_corpus, args.val_fraction, args.num_proc)
-            get_batch = make_get_batch(device, args.block_size, args.batch_size)
+              tokenize_to_bins(args.tokenizer_json, args.train_corpus, args.val_fraction, args.num_proc)
+              get_batch = make_get_batch(device, args.block_size, args.batch_size)
 
-            optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9,args.beta2), weight_decay=args.weight_decay)
-            from torch.optim.lr_scheduler import LinearLR, SequentialLR, CosineAnnealingLR
-            total_updates = math.ceil(args.max_iters / max(1,args.grad_accum))
-            warm_updates = min(args.warmup_steps, max(1, total_updates))
-            sched_warm = LinearLR(optimizer, total_iters=warm_updates)
-            sched_cos = CosineAnnealingLR(optimizer, T_max=max(1, total_updates-warm_updates), eta_min=args.min_lr)
-            scheduler = SequentialLR(optimizer, schedulers=[sched_warm,sched_cos], milestones=[warm_updates])
+              optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9,args.beta2), weight_decay=args.weight_decay)
+              from torch.optim.lr_scheduler import LinearLR, SequentialLR, CosineAnnealingLR
+              total_updates = math.ceil(args.max_iters / max(1,args.grad_accum))
+              warm_updates = min(args.warmup_steps, max(1, total_updates))
+              sched_warm = LinearLR(optimizer, total_iters=warm_updates)
+              sched_cos = CosineAnnealingLR(optimizer, T_max=max(1, total_updates-warm_updates), eta_min=args.min_lr)
+              scheduler = SequentialLR(optimizer, schedulers=[sched_warm,sched_cos], milestones=[warm_updates])
 
-            best_val = float("inf")
-            train_curve, val_curve, lr_curve = [], [], []
-            updates = 0
-            ctx = torch.amp.autocast(device_type="cuda", dtype=torch.float16) if device=="cuda" else nullcontext()
-            pbar = tqdm(range(args.max_iters), desc="train micro-steps")
+              best_val = float("inf")
+              train_curve, val_curve, lr_curve = [], [], []
+              updates = 0
+              ctx = torch.amp.autocast(device_type="cuda", dtype=torch.float16) if device=="cuda" else nullcontext()
+              pbar = tqdm(range(args.max_iters), desc="train micro-steps")
 
-            for step in pbar:
-                X,Y = get_batch("train")
-                with ctx: _, loss = model(X,Y)
-                (loss/args.grad_accum).backward()
-                if ((step+1)%args.grad_accum==0) or (step+1==args.max_iters):
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_grad_norm)
-                    optimizer.step(); optimizer.zero_grad(set_to_none=True)
-                    scheduler.step(); updates+=1
-                    if updates%max(1,args.eval_interval)==0:
-                        losses = estimate_loss(model,get_batch,args.eval_iters,ctx)
-                        train_curve.append(losses["train"]); val_curve.append(losses["val"]); lr_curve.append(optimizer.param_groups[0]["lr"])
-                        pbar.set_postfix(train=f"{losses['train']:.4f}", val=f"{losses['val']:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}")
-                        if losses["val"] < best_val:
-                            best_val = losses["val"]
-                            torch.save(model.state_dict(), args.best_weights)
+              for step in pbar:
+                  X,Y = get_batch("train")
+                  with ctx: _, loss = model(X,Y)
+                  (loss/args.grad_accum).backward()
+                  if ((step+1)%args.grad_accum==0) or (step+1==args.max_iters):
+                      torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_grad_norm)
+                      optimizer.step(); optimizer.zero_grad(set_to_none=True)
+                      scheduler.step(); updates+=1
+                      if updates%max(1,args.eval_interval)==0:
+                          losses = estimate_loss(model,get_batch,args.eval_iters,ctx)
+                          train_curve.append(losses["train"]); val_curve.append(losses["val"]); lr_curve.append(optimizer.param_groups[0]["lr"])
+                          pbar.set_postfix(train=f"{losses['train']:.4f}", val=f"{losses['val']:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}")
+                          if losses["val"] < best_val:
+                              best_val = losses["val"]
+                              torch.save(model.state_dict(), args.best_weights)
 
-            torch.save(model.state_dict(), args.final_weights)
-            report = {"best_val_loss": best_val,"updates": updates,"max_iters": args.max_iters}
-            with open(args.training_report, "w") as f: json.dump(report,f,indent=2)
+              torch.save(model.state_dict(), args.final_weights)
+              report = {"best_val_loss": best_val,"updates": updates,"max_iters": args.max_iters}
+              with open(args.training_report, "w") as f: json.dump(report,f,indent=2)
 
-            os.makedirs(os.path.dirname(args.loss_curve_csv) or ".",exist_ok=True)
-            with open(args.loss_curve_csv,"w",newline="",encoding="utf-8") as f:
-                w = csv.writer(f); w.writerow(["update","train_loss","val_loss","lr"])
-                for i,(tr,va,lr) in enumerate(zip(train_curve,val_curve,lr_curve),start=1):
-                    w.writerow([i,tr,va,lr])
+              os.makedirs(os.path.dirname(args.loss_curve_csv) or ".",exist_ok=True)
+              with open(args.loss_curve_csv,"w",newline="",encoding="utf-8") as f:
+                  w = csv.writer(f); w.writerow(["update","train_loss","val_loss","lr"])
+                  for i,(tr,va,lr) in enumerate(zip(train_curve,val_curve,lr_curve),start=1):
+                      w.writerow([i,tr,va,lr])
 
-            schema_list = [{"epoch":int(i),"loss":float(tr),"validation_loss":float(va)} for i,(tr,va) in enumerate(zip(train_curve,val_curve),start=1)]
-            with open(args.schema_output,"w") as f: json.dump(schema_list,f,separators=(",",":"))
+              schema_list = [{"epoch":int(i),"loss":float(tr),"validation_loss":float(va)} for i,(tr,va) in enumerate(zip(train_curve,val_curve),start=1)]
+              with open(args.schema_output,"w") as f: json.dump(schema_list,f,separators=(",",":"))
 
-        if __name__=="__main__": main()
+          if __name__=="__main__": main()
+
     args:
       - --tokenizer-json
       - {inputPath: tokenizer_json}
