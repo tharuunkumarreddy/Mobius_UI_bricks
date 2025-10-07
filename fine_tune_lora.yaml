@@ -1,7 +1,11 @@
-name: Fine-Tuning Gemma3 Model with LoRA
-description: Fine-tunes the pretrained Gemma3 model using Hugging Face transformers and LoRA for efficient training.
+name: Finetune_LoRA_Model_1731
+description: >
+  Performs LoRA-based PEFT finetuning of a Gemma3 model using memmapped tokenized corpus.
+  Includes AMP, warmup→cosine LR scheduling, gradient accumulation, automatic LoRA target discovery,
+  and best/final adapter checkpoints.
 
 inputs:
+  # --- model & data inputs ---
   - name: tokenizer_json
     type: Model
   - name: train_corpus
@@ -13,7 +17,7 @@ inputs:
   - name: model_py_in
     type: Data
 
-  # Hyperparameters (same defaults)
+  # --- training hyperparameters ---
   - name: learning_rate
     type: String
     default: "1e-4"
@@ -57,6 +61,23 @@ inputs:
     type: Integer
     default: "8"
 
+  # --- LoRA-specific ---
+  - name: r
+    type: Integer
+    default: "8"
+  - name: lora_alpha
+    type: Integer
+    default: "16"
+  - name: lora_dropout
+    type: String
+    default: "0.05"
+  - name: bias
+    type: String
+    default: "none"
+  - name: lora_target_modules
+    type: String
+    default: ""    # optional CSV override
+
 outputs:
   - name: best_weights
     type: Model
@@ -78,123 +99,258 @@ implementation:
       - python3
       - -u
       - -c
-      - |
-        import subprocess, sys, os, json, argparse, csv
-        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir", 
-                        "transformers", "peft", "datasets", "torch"], check=True)
+      - |-
+        import subprocess, sys
+        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir",
+                        "torch>=2.2", "tokenizers", "datasets", "tqdm", "numpy", "peft"], check=True)
 
+        import os, json, math, shutil, importlib.util, csv, random, argparse
+        import numpy as np
         import torch
-        from transformers import AutoModelForSequenceClassification, Trainer, TrainingArguments
-        from peft import LoraConfig, get_peft_model
-        from datasets import load_dataset
+        import torch.nn.functional as F
+        from contextlib import nullcontext
         from tokenizers import Tokenizer
+        from datasets import load_dataset
+        from tqdm import tqdm
+        from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
 
-        # Parse args
-        ap = argparse.ArgumentParser()
-        ap.add_argument("--tokenizer-json", required=True)
-        ap.add_argument("--train-corpus", required=True)
-        ap.add_argument("--model-config", required=True)
-        ap.add_argument("--model-weights", required=True)
-        ap.add_argument("--model-py-in", required=True)
-        ap.add_argument("--learning-rate", required=True)
-        ap.add_argument("--min-lr", required=True)
-        ap.add_argument("--warmup-steps", required=True)
-        ap.add_argument("--max-iters", required=True)
-        ap.add_argument("--batch-size", required=True)
-        ap.add_argument("--block-size", required=True)
-        ap.add_argument("--grad-accum", required=True)
-        ap.add_argument("--eval-interval", required=True)
-        ap.add_argument("--eval-iters", required=True)
-        ap.add_argument("--weight-decay", required=True)
-        ap.add_argument("--beta2", required=True)
-        ap.add_argument("--clip-grad-norm", required=True)
-        ap.add_argument("--val-fraction", required=True)
-        ap.add_argument("--num-proc", required=True)
-        ap.add_argument("--best-weights", required=True)
-        ap.add_argument("--final-weights", required=True)
-        ap.add_argument("--training-report", required=True)
-        ap.add_argument("--loss-curve-csv", required=True)
-        ap.add_argument("--model-py-out", required=True)
-        ap.add_argument("--schema-output", required=True)
-        args = ap.parse_args()
+        # ------------------------------------------------------------------
+        # Helper functions (copied from finetuning.py)
+        # ------------------------------------------------------------------
 
-        # Load tokenizer and dataset
-        tokenizer = Tokenizer.from_file(args.tokenizer_json)
-        dataset = load_dataset("text", data_files={"train": args.train_corpus})
-        
-        # Load pretrained model
-        model = AutoModelForSequenceClassification.from_pretrained("google/bert-base-cased")
-        model.load_state_dict(torch.load(args.model_weights))  # pretrained weights
+        def seed_everything(seed=42):
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
 
-        # Apply LoRA
-        lora_config = LoraConfig(
-            r=8,
-            lora_alpha=8,
-            lora_dropout=0.1,
-            bias="none"
-        )
-        model = get_peft_model(model, lora_config)
+        def _find_model_py_file(path_or_dir):
+            if os.path.isfile(path_or_dir): return path_or_dir
+            if not os.path.isdir(path_or_dir): raise ValueError(f"{path_or_dir} invalid")
+            py_files = [os.path.join(path_or_dir, f) for f in os.listdir(path_or_dir) if f.endswith(".py")]
+            if not py_files: raise FileNotFoundError(f"No .py file found in {path_or_dir}")
+            return py_files[0]
 
-        # Setup Trainer
-        training_args = TrainingArguments(
-            output_dir="./fine_tuned_model",
-            per_device_train_batch_size=int(args.batch_size),
-            max_steps=int(args.max_iters),
-            learning_rate=float(args.learning_rate),
-            warmup_steps=int(args.warmup_steps),
-            weight_decay=float(args.weight_decay),
-            logging_dir="./logs",
-            logging_steps=500,
-            evaluation_strategy="no",
-            save_strategy="steps",
-            save_steps=1000,
-            load_best_model_at_end=True,
-            save_total_limit=1
-        )
+        def _load_model_class_from_file(py_path, class_name="Gemma3Model"):
+            if not py_path.endswith(".py"):
+                tmp = py_path + ".py"; shutil.copyfile(py_path, tmp); py_path = tmp
+            spec = importlib.util.spec_from_file_location("gemma3_model", py_path)
+            mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+            return getattr(mod, class_name)
 
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            train_dataset=dataset["train"],
-            tokenizer=None
-        )
+        def _choose_bin_dtype(vocab_size):
+            if vocab_size <= (1 << 16): return np.uint16
+            if vocab_size <= (1 << 32): return np.uint32
+            return np.uint64
 
-        trainer.train()
+        def _tokenize_to_bins(tokenizer_path, train_txt, val_fraction, num_proc):
+            tok = Tokenizer.from_file(tokenizer_path)
+            vocab_size = tok.get_vocab_size()
+            BIN_DTYPE = _choose_bin_dtype(vocab_size)
+            ds_single = load_dataset("text", data_files={"train": train_txt})
+            split = ds_single["train"].train_test_split(test_size=float(val_fraction), seed=42)
+            ds = {"train": split["train"], "val": split["test"]}
+            def proc(ex): ids = tok.encode(ex["text"]).ids; return {"ids": ids, "len": len(ids)}
+            nproc = max(1, min(int(num_proc), (os.cpu_count() or 1)))
+            tokenized = {sp: d.map(proc, remove_columns=d.column_names, desc=f"tokenizing {sp}", num_proc=nproc)
+                         for sp, d in ds.items()}
+            def write_split(dset, filename):
+                total = int(np.sum(dset["len"], dtype=np.uint64))
+                arr = np.memmap(filename, dtype=BIN_DTYPE, mode="w+", shape=(total,))
+                idx = 0
+                for ex in dset["ids"]:
+                    arr[idx:idx+len(ex)] = np.asarray(ex, dtype=BIN_DTYPE)
+                    idx += len(ex)
+                arr.flush(); return total
+            train_tokens = write_split(tokenized["train"], "train.bin")
+            val_tokens = write_split(tokenized["val"], "val.bin")
+            meta = {"vocab_size": vocab_size, "train_tokens": int(train_tokens), "val_tokens": int(val_tokens),
+                    "bin_dtype": str(BIN_DTYPE.__name__)}
+            with open("bin_meta.json","w") as f: json.dump(meta,f,indent=2)
+            return meta
 
-        # Save outputs
-        os.makedirs(os.path.dirname(args.final_weights) or ".", exist_ok=True)
-        model.save_pretrained(args.final_weights)
-        trainer.save_model(args.best_weights)
+        class _Batcher:
+            def __init__(self, device, device_type, block_size, batch_size):
+                with open("bin_meta.json","r") as f: meta=json.load(f)
+                dtype_map={"uint16":np.uint16,"uint32":np.uint32,"uint64":np.uint64}
+                BIN_DTYPE=dtype_map[meta["bin_dtype"]]
+                self.device=device; self.device_type=device_type
+                self.block_size=block_size; self.batch_size=batch_size
+                self.train_data=np.memmap("train.bin",dtype=BIN_DTYPE,mode="r")
+                self.val_data=np.memmap("val.bin",dtype=BIN_DTYPE,mode="r")
+            def _sample(self,data):
+                ix=torch.randint(len(data)-self.block_size-1,(self.batch_size,))
+                x=torch.stack([torch.from_numpy(np.asarray(data[i:i+self.block_size],dtype=np.int64)) for i in ix])
+                y=torch.stack([torch.from_numpy(np.asarray(data[i+1:i+self.block_size+1],dtype=np.int64)) for i in ix])
+                if self.device_type=="cuda":
+                    x=x.pin_memory().to(self.device,non_blocking=True)
+                    y=y.pin_memory().to(self.device,non_blocking=True)
+                else: x,y=x.to(self.device),y.to(self.device)
+                return x,y
+            def get_batch(self,split): return self._sample(self.train_data if split=="train" else self.val_data)
 
-        # Save schema JSON
-        schema = {
-            "model_name": "Gemma3",
-            "learning_rate": args.learning_rate,
-            "batch_size": args.batch_size,
-            "warmup_steps": args.warmup_steps,
-            "max_iters": args.max_iters,
-            "best_weights": args.best_weights,
-            "final_weights": args.final_weights
-        }
-        os.makedirs(os.path.dirname(args.schema_output) or ".", exist_ok=True)
-        with open(args.schema_output, "w", encoding="utf-8") as f:
-            json.dump(schema, f, indent=2)
+        def _estimate_loss(model,get_batch,eval_iters,ctx):
+            out={}; model.eval()
+            with torch.inference_mode():
+                for split in ["train","val"]:
+                    losses=torch.zeros(eval_iters,device="cpu")
+                    for k in range(eval_iters):
+                        X,Y=get_batch(split)
+                        with ctx: _,loss=model(input_ids=X,labels=Y)
+                        losses[k]=loss.item()
+                    out[split]=losses.mean().item()
+            model.train(); return out
 
-        # Generate Python loader for downstream
-        with open(args.model_py_out, "w", encoding="utf-8") as f:
-            f.write("import torch\n")
-            f.write("from transformers import AutoModelForSequenceClassification\n")
-            f.write("model = AutoModelForSequenceClassification.from_pretrained('" + args.final_weights + "')\n")
-            f.write("model.eval()\n")
+        def _scheduler_warmup_cosine(optimizer,total_updates,warmup_steps,min_lr):
+            from torch.optim.lr_scheduler import LinearLR,SequentialLR,CosineAnnealingLR
+            total_updates=max(1,int(total_updates)); warm_updates=max(0,min(int(warmup_steps),total_updates))
+            base_lr=optimizer.param_groups[0]["lr"]; eps=1e-8
+            start_factor=max((min_lr/base_lr) if base_lr>0 else 0.0,eps); start_factor=min(start_factor,1.0)
+            if warm_updates>0 and start_factor<1.0:
+                sched_warm=LinearLR(optimizer,total_iters=warm_updates,start_factor=start_factor)
+                remain=max(1,total_updates-warm_updates)
+                sched_cos=CosineAnnealingLR(optimizer,T_max=remain,eta_min=min_lr)
+                return SequentialLR(optimizer,[sched_warm,sched_cos],[warm_updates]),warm_updates
+            return CosineAnnealingLR(optimizer,T_max=total_updates,eta_min=min_lr),0
 
-        # Dummy report and loss CSV
-        with open(args.training_report, "w", encoding="utf-8") as f:
-            json.dump({"learning_rate": args.learning_rate, "batch_size": args.batch_size}, f, indent=2)
+        def _save_peft_adapters(model,path):
+            os.makedirs(os.path.dirname(path) or ".",exist_ok=True)
+            try: state=get_peft_model_state_dict(model)
+            except Exception: state={k:v.cpu() for k,v in model.named_parameters() if v.requires_grad}
+            torch.save(state,path)
 
-        with open(args.loss_curve_csv, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["step","train_loss","val_loss"])
-            writer.writerow([1, 0.0, 0.0])
+        def _infer_lora_targets(model,user_list=None):
+            import torch.nn as nn
+            if user_list: return user_list
+            core=getattr(model,"model",model)
+            names=[n for n,m in core.named_modules() if isinstance(m,nn.Linear)]
+            leaf=[n.split(".")[-1] for n in names]
+            keys=["q_proj","k_proj","v_proj","o_proj","w1","w2","w3","proj","fc","linear"]
+            targets=[n for n in leaf if any(k in n.lower() for k in keys)] or leaf
+            return sorted(set(targets))
+
+        # ------------------------------------------------------------------
+        # main finetune logic
+        # ------------------------------------------------------------------
+
+        def main():
+            ap=argparse.ArgumentParser()
+            # inputs
+            ap.add_argument("--tokenizer-json",required=True)
+            ap.add_argument("--train-corpus",required=True)
+            ap.add_argument("--model-config",required=True)
+            ap.add_argument("--model-weights",required=True)
+            ap.add_argument("--model-py-in",required=True)
+            ap.add_argument("--model-py-out",required=True)
+            # hparams
+            ap.add_argument("--learning-rate",type=float,required=True)
+            ap.add_argument("--min-lr",type=float,required=True)
+            ap.add_argument("--warmup-steps",type=int,required=True)
+            ap.add_argument("--max-iters",type=int,required=True)
+            ap.add_argument("--batch-size",type=int,required=True)
+            ap.add_argument("--block-size",type=int,required=True)
+            ap.add_argument("--grad-accum",type=int,required=True)
+            ap.add_argument("--eval-interval",type=int,required=True)
+            ap.add_argument("--eval-iters",type=int,required=True)
+            ap.add_argument("--weight-decay",type=float,required=True)
+            ap.add_argument("--beta2",type=float,required=True)
+            ap.add_argument("--clip-grad-norm",type=float,required=True)
+            ap.add_argument("--val-fraction",type=float,required=True)
+            ap.add_argument("--num-proc",type=int,required=True)
+            # lora
+            ap.add_argument("--r",type=int,required=True)
+            ap.add_argument("--lora-alpha",type=int,required=True)
+            ap.add_argument("--lora-dropout",type=float,required=True)
+            ap.add_argument("--bias",type=str,default="none")
+            ap.add_argument("--lora-target-modules",type=str,default="")
+            # outputs
+            ap.add_argument("--best-weights",required=True)
+            ap.add_argument("--final-weights",required=True)
+            ap.add_argument("--training-report",required=True)
+            ap.add_argument("--loss-curve-csv",required=True)
+            ap.add_argument("--schema-output",required=True)
+            args=ap.parse_args()
+
+            seed_everything(42)
+            device="cuda" if torch.cuda.is_available() else "cpu"
+            device_type="cuda" if device=="cuda" else "cpu"
+            print(f"[INFO] Finetuning (LoRA) on {device.upper()}")
+            ctx=nullcontext() if device_type=="cpu" else torch.amp.autocast(device_type=device_type)
+            scaler=torch.cuda.amp.GradScaler(enabled=(device_type=="cuda"))
+
+            # prepare model
+            model_py_path=_find_model_py_file(args.model_py_in)
+            os.makedirs(os.path.dirname(args.model_py_out) or ".",exist_ok=True)
+            shutil.copyfile(model_py_path,args.model_py_out)
+            with open(args.model_config,"r") as f: cfg=json.load(f)
+            cfg["dtype"]=torch.float16 if str(cfg.get("dtype"))=="float16" else torch.float32
+            tok=Tokenizer.from_file(args.tokenizer_json)
+            Gemma3Model=_load_model_class_from_file(model_py_path,"Gemma3Model")
+            base_model=Gemma3Model(cfg).to(device)
+            state=torch.load(args.model_weights,map_location=device)
+            base_model.load_state_dict(state,strict=True); base_model.train()
+
+            # wrap for PEFT
+            class HFCompatCausalLM(torch.nn.Module):
+                def __init__(self,core): super().__init__(); self.model=core
+                def forward(self,input_ids=None,labels=None,*a,**kw): return self.model(input_ids,labels)
+            wrapped=HFCompatCausalLM(base_model)
+            targets=_infer_lora_targets(wrapped,[s.strip() for s in args.lora_target_modules.split(",") if s.strip()] or None)
+            lora_cfg=LoraConfig(r=args.r,lora_alpha=args.lora_alpha,lora_dropout=args.lora_dropout,
+                                bias=args.bias,target_modules=targets,task_type="FEATURE_EXTRACTION")
+            model=get_peft_model(wrapped,lora_cfg)
+            trainable_params=sum(p.numel() for p in model.parameters() if p.requires_grad)
+            print(f"[INFO] Trainable LoRA params: {trainable_params}")
+
+            meta=_tokenize_to_bins(args.tokenizer_json,args.train_corpus,args.val_fraction,args.num_proc)
+            batcher=_Batcher(device,device_type,args.block_size,args.batch_size)
+            get_batch=batcher.get_batch
+            optimizer=torch.optim.AdamW(model.parameters(),lr=args.learning_rate,betas=(0.9,args.beta2),
+                                        weight_decay=args.weight_decay,eps=1e-9)
+            total_updates=math.ceil(args.max_iters/max(1,args.grad_accum))
+            scheduler,warm=_scheduler_warmup_cosine(optimizer,total_updates,args.warmup_steps,args.min_lr)
+            best_val=float("inf"); train_curve=[]; val_curve=[]; lr_curve=[]; updates=0
+
+            # optional initial eval
+            try:
+                init_losses=_estimate_loss(model,get_batch,args.eval_iters,ctx)
+                best_val=init_losses["val"]; _save_peft_adapters(model,args.best_weights)
+                print(f"[INFO] Initial eval val={best_val:.4f}")
+            except Exception as e: print(f"[WARN] initial eval skipped {e}")
+
+            pbar=tqdm(range(args.max_iters),desc="LoRA steps")
+            for step in pbar:
+                X,Y=get_batch("train")
+                with ctx: _,loss=model(input_ids=X,labels=Y)
+                (loss/args.grad_accum).backward()
+                if (step+1)%args.grad_accum==0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(),max_norm=args.clip_grad_norm)
+                    optimizer.step(); optimizer.zero_grad(set_to_none=True); scheduler.step(); updates+=1
+                    if updates%max(1,args.eval_interval)==0:
+                        losses=_estimate_loss(model,get_batch,args.eval_iters,ctx)
+                        train_curve.append(losses["train"]); val_curve.append(losses["val"])
+                        lr_curve.append(optimizer.param_groups[0]["lr"])
+                        pbar.set_postfix(train=f"{losses['train']:.3f}",val=f"{losses['val']:.3f}")
+                        if losses["val"]<best_val:
+                            best_val=losses["val"]; _save_peft_adapters(model,args.best_weights)
+
+            _save_peft_adapters(model,args.final_weights)
+
+            report={"best_val_loss":best_val,"updates":updates,"total_updates":total_updates,
+                    "batch_size":args.batch_size,"block_size":args.block_size,
+                    "train_tokens":meta.get("train_tokens"),"val_tokens":meta.get("val_tokens"),
+                    "total_trainable_params":trainable_params}
+            with open(args.training_report,"w") as f: json.dump(report,f,indent=2)
+            with open(args.loss_curve_csv,"w",newline="") as f:
+                w=csv.writer(f); w.writerow(["update","train","val","lr"])
+                for i,(t,v,l) in enumerate(zip(train_curve,val_curve,lr_curve),1): w.writerow([i,t,v,l])
+            schema=[{"epoch":i,"loss":float(t),"val_loss":float(v)} for i,(t,v) in enumerate(zip(train_curve,val_curve),1)]
+            with open(args.schema_output,"w") as f: json.dump(schema,f,separators=(",",":"))
+            print("[DONE] Finetuning complete.")
+
+        if __name__=="__main__": main()
 
     args:
       - --tokenizer-json
@@ -236,6 +392,17 @@ implementation:
       - {inputValue: val_fraction}
       - --num-proc
       - {inputValue: num_proc}
+
+      - --r
+      - {inputValue: r}
+      - --lora-alpha
+      - {inputValue: lora_alpha}
+      - --lora-dropout
+      - {inputValue: lora_dropout}
+      - --bias
+      - {inputValue: bias}
+      - --lora-target-modules
+      - {inputValue: lora_target_modules}
 
       - --best-weights
       - {outputPath: best_weights}
